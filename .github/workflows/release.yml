@@ -1,0 +1,117 @@
+name: Build AutoTyper.exe
+
+# Pushing a tag such as v1.0.0 builds the executable and attaches it to a
+# GitHub release. The in-app updater looks at the *latest release*, so the
+# asset name matters: it must stay AutoTyper.exe (or at least end in .exe).
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller pynput
+
+      - name: Run the test suite
+        run: python -m unittest discover -v -p "test_*.py"
+
+      - name: Read the application version
+        id: app
+        shell: bash
+        run: |
+          VERSION=$(python -c "import re,pathlib;print(re.search(r'APP_VERSION = \"([^\"]+)\"', pathlib.Path('auto_typer.py').read_text(encoding='utf-8')).group(1))")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building AutoTyper $VERSION"
+
+      - name: Check the tag matches APP_VERSION
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "$TAG" != "${{ steps.app.outputs.version }}" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match APP_VERSION ${{ steps.app.outputs.version }}"
+            exit 1
+          fi
+
+      - name: Generate the Windows version resource
+        shell: python
+        run: |
+          import pathlib
+          version = "${{ steps.app.outputs.version }}"
+          numbers = [int(part) for part in version.split(".") if part.isdigit()]
+          numbers = (numbers + [0, 0, 0, 0])[:4]
+          dotted = ".".join(str(n) for n in numbers)
+          content = f"""VSVersionInfo(
+            ffi=FixedFileInfo(
+              filevers=({numbers[0]}, {numbers[1]}, {numbers[2]}, {numbers[3]}),
+              prodvers=({numbers[0]}, {numbers[1]}, {numbers[2]}, {numbers[3]}),
+              mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)
+            ),
+            kids=[
+              StringFileInfo([
+                StringTable(
+                  '040904B0',
+                  [StringStruct('CompanyName', 'AutoTyper'),
+                   StringStruct('FileDescription', 'AutoTyper - keystroke trace simulator and auto-typer'),
+                   StringStruct('FileVersion', '{dotted}'),
+                   StringStruct('InternalName', 'AutoTyper'),
+                   StringStruct('OriginalFilename', 'AutoTyper.exe'),
+                   StringStruct('ProductName', 'AutoTyper'),
+                   StringStruct('ProductVersion', '{dotted}')])
+              ]),
+              VarFileInfo([VarStruct('Translation', [1033, 1200])])
+            ]
+          )
+          """
+          target = pathlib.Path("build")
+          target.mkdir(parents=True, exist_ok=True)
+          (target / "version_info.txt").write_text(content, encoding="utf-8")
+          print(f"version resource written for {dotted}")
+
+      - name: Build AutoTyper.exe
+        run: pyinstaller AutoTyper.spec --noconfirm
+
+      - name: Verify the executable
+        shell: python
+        run: |
+          import pathlib
+          import sys
+          exe = pathlib.Path("dist/AutoTyper.exe")
+          if not exe.is_file():
+              sys.exit("dist/AutoTyper.exe was not produced")
+          size = exe.stat().st_size
+          with exe.open("rb") as handle:
+              header = handle.read(2)
+          if header != b"MZ":
+              sys.exit(f"dist/AutoTyper.exe is not a Windows executable (header {header!r})")
+          if size < 1_000_000:
+              sys.exit(f"dist/AutoTyper.exe looks too small to be a real build ({size} bytes)")
+          print(f"AutoTyper.exe built successfully: {size / 1048576:.1f} MiB")
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" \
+                 --title "AutoTyper $GITHUB_REF_NAME" \
+                 --notes "Windows build of AutoTyper $GITHUB_REF_NAME. Download **AutoTyper.exe** and run it - no Python installation required."
+          gh release upload "$GITHUB_REF_NAME" dist/AutoTyper.exe --clobber
+          gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name'
