@@ -16,6 +16,13 @@ name: Picker rendering probe
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
+    paths:
+      - "tools/render_picker_probe.py"
+      - "auto_typer.py"
+      - "AutoTyper.spec"
+      - ".github/workflows/diagnostics.yml"
     paths:
       - "tools/render_picker_probe.py"
       - "auto_typer.py"
