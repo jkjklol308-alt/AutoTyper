@@ -97,6 +97,16 @@ The header keeps a single **⚙ Settings** button — palettes, window behaviour
 - Choose a **Primary**, **Accent** and **Background** colour (drag in the gradient or type `#RRGGBB`), watch the live preview, give the set a name, and **Save colours**.
 - Saved palettes appear in the palette grid marked with a ★, are applied instantly, survive restarts (stored in `~/.autotyper_settings.json`; settings from earlier releases under the old file name are picked up automatically), and can be re-opened for editing by double-clicking a card or pressing **Edit selected**. **Delete selected** removes one; built-in palettes cannot be deleted. Up to 16 custom palettes are kept.
 
+## Version numbering
+
+AutoTyper versions use the format `MAJOR.MINOR.PATCH` (for example, `1.1.2`):
+
+- **First number (`MAJOR`)**: changes to the app's logic.
+- **Second number (`MINOR`)**: other changes.
+- **Third number (`PATCH`)**: bug fixes.
+
+When either the first or second number is increased, reset the bug-fix number to `0`. For example, a bug-fix release could go from `1.1.2` to `1.1.3`, while an increase to the second number would go from `1.1.2` to `1.2.0`.
+
 ## Building the executable yourself
 
 ```bash
@@ -104,4 +114,4 @@ pip install pyinstaller pynput
 pyinstaller AutoTyper.spec --noconfirm     # -> dist/AutoTyper.exe
 ```
 
-Pushing a tag that matches `APP_VERSION` (for example `v1.1.1`) makes GitHub Actions run the tests, build the executable and attach it to a release automatically — see `.github/workflows/release.yml`.
+Pushing a tag that matches `APP_VERSION` (for example `v1.1.1`) makes GitHub Actions run the tests, build the executable and attach it to a release automatically — see `.github/workflows/release.yml`. Update `APP_VERSION` in `auto_typer.py` and use the matching `v...` tag when publishing a release.
