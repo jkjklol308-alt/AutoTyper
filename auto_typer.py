@@ -28,7 +28,12 @@ A next-generation human typing simulator implementing:
   9. .exe Delivery: updates download the published AutoTyper.exe rather than a
      Python script. A packaged build swaps itself in and restarts
      automatically (keeping a .old backup); a build running from source saves
-     the executable next to the user's other downloads.
+     the executable next to the user's other downloads. Since v1.1.2 the
+     restart is started with a clean environment, exactly like a manual
+     double-click: PyInstaller's onefile variables are cleared first, so the
+     next build unpacks its own files instead of looking for the previous
+     process's temporary folder (which made the app die with "Error loading
+     Python DLL" straight after an update).
  10. Custom UI Colours (v1.1.0, reworked in v1.1.1): a Microsoft-Paint style
      gradient colour picker — a full colour field (rainbow of hues across,
      saturation fading down, drawn at the current shade) plus a white-to-black
@@ -73,7 +78,7 @@ try:
 except ImportError:
     tk = messagebox = ttk = None
 
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 APP_NAME = "AutoTyper"
 GITHUB_REPO = "jkjklol308-alt/AutoTyper"
 EXE_ASSET_NAME = "AutoTyper.exe"
@@ -1568,6 +1573,41 @@ class TracePlayer:
 #     exits (Windows keeps the .exe locked while it runs), a .old backup of the
 #     previous executable is left behind, and a download that is not a real
 #     Windows executable is rejected before anything is touched.
+#   * Restarting is clean: the relaunch is started without PyInstaller's
+#     onefile bookkeeping in the environment (see
+#     `restart_environment()`), so the new build extracts its own files
+#     instead of looking for the previous process's temporary folder.
+#
+# Why the environment matters: a onefile build keeps the path of its unpacked
+# temporary directory in the environment (_PYI_APPLICATION_HOME_DIR, and
+# _PYI_ARCHIVE_FILE for the executable itself) and hands both to any process
+# it starts. A restart that inherits those variables makes the *new* build
+# believe it is the child of a still-running launcher: it skips unpacking and
+# loads python3xx.dll straight out of the previous process's folder — which
+# has just been deleted — and dies with "Error loading Python DLL" before a
+# single line of Python runs. Launching the same file by hand works, because a
+# double-click starts with a clean environment. Every relaunch therefore
+# scrubs those variables, and the swap script additionally asks the bootloader
+# for a reset (PYINSTALLER_RESET_ENVIRONMENT=1) as a second line of defence.
+
+# PyInstaller's onefile bookkeeping. They describe *this* process's unpacked
+# files, so they must never be handed to a freshly started build.
+PYINSTALLER_RUNTIME_ENV_VARS = (
+    "_PYI_APPLICATION_HOME_DIR",
+    "_PYI_ARCHIVE_FILE",
+    "_PYI_PARENT_PROCESS_LEVEL",
+    "_PYI_SPLASH_IPC",
+    "_PYI_LINUX_PROCESS_NAME",
+    "_MEIPASS2",
+)
+
+# PyInstaller honours this one itself: "1" forces a full environment reset, as
+# if the build had been started from a clean shell.
+PYINSTALLER_RESET_ENV_VAR = "PYINSTALLER_RESET_ENVIRONMENT"
+
+# Windows environment variable names are case-insensitive, so matching is done
+# on upper case copies.
+_PYINSTALLER_RUNTIME_ENV_VARS_UPPER = frozenset(name.upper() for name in PYINSTALLER_RUNTIME_ENV_VARS)
 
 _VERSION_DECLARATION = re.compile(
     r'^[ \t]*APP_VERSION[ \t]*=[ \t]*["\']([0-9A-Za-z._+-]+)["\']', re.MULTILINE
@@ -1834,6 +1874,43 @@ def running_executable() -> Optional[Path]:
     return Path(executable) if executable else None
 
 
+def restart_environment(env: Optional[dict] = None) -> Dict[str, str]:
+    """A copy of the environment with PyInstaller's onefile state removed.
+
+    Everything a freshly started build needs (``PATH``, ``TEMP``, the user's
+    Windows folders) is kept; only the variables that describe *this*
+    process's unpacked files are dropped, so the new build unpacks its own.
+    Used for every relaunch and restart this program performs.
+    """
+    source = os.environ if env is None else env
+    clean: Dict[str, str] = {}
+    for name, value in source.items():
+        if name.upper() in _PYINSTALLER_RUNTIME_ENV_VARS_UPPER:
+            continue
+        clean[name] = value
+    return clean
+
+
+def scrub_pyinstaller_runtime_environment(env=None) -> List[str]:
+    """Delete this process's PyInstaller onefile state from ``env``.
+
+    Called once at start-up so that *any* child process — the update swap
+    script, a file manager, anything spawned later — inherits a clean
+    environment instead of a description of our own unpacked files.
+
+    ``env`` defaults to ``os.environ``; returns the names actually removed.
+    """
+    target = os.environ if env is None else env
+    removed: List[str] = []
+    for name in PYINSTALLER_RUNTIME_ENV_VARS:
+        try:
+            target.pop(name)
+        except (KeyError, TypeError):
+            continue
+        removed.append(name)
+    return removed
+
+
 def default_download_dir() -> Path:
     """Where a .exe is saved when it cannot replace the running program."""
     for candidate in (Path.home() / "Downloads", Path.home()):
@@ -2006,18 +2083,34 @@ def build_windows_swap_script(new_exe, target_exe, wait_seconds: int = 120,
     Windows locks a running executable, so the copy is retried once a second
     until it succeeds (or `wait_seconds` elapse); `copy` failing while the old
     build is still alive is expected and simply loops. The previous executable
-    is kept as "<name>.old" so a bad build can always be rolled back.
+    is copied to "<name>.old" *before* the swap, so a bad build can always be
+    rolled back.
+
+    The script also clears PyInstaller's onefile variables and asks the
+    bootloader for a full environment reset before starting the new build:
+    without that, the relaunched executable inherits the path of this
+    process's temporary folder, skips unpacking and fails to load the Python
+    DLL (the "error right after an update" that a manual double-click of the
+    very same file does not show).
     """
     new_path = _bat_quote(new_exe)
     target_path = _bat_quote(target_exe)
-    backup_lines = f'copy /Y "%TARGET%" "%TARGET%.old" >nul 2>&1\n' if backup else ""
+    # Taken while the old build is still in place: after the swap the target
+    # *is* the new build, so a later copy would back up the wrong file.
+    backup_lines = 'copy /Y "%TARGET%" "%TARGET%.old" >nul 2>&1\r\n' if backup else ""
     return (
         "@echo off\r\n"
         "setlocal\r\n"
         f'set "NEW={new_path}"\r\n'
         f'set "TARGET={target_path}"\r\n'
         f'set "TRIES={max(1, int(wait_seconds))}"\r\n'
-        "set /a COUNT=0\r\n"
+        # Start the new build exactly like a hand-launched copy: no unpacked-
+        # file paths from this process, and an explicit reset in case something
+        # else re-adds them.
+        f'set "{PYINSTALLER_RESET_ENV_VAR}=1"\r\n'
+        + "".join(f'set "{name}=\r\n' for name in PYINSTALLER_RUNTIME_ENV_VARS)
+        + "set /a COUNT=0\r\n"
+        f"{backup_lines}"
         ":waitloop\r\n"
         'copy /Y "%NEW%" "%TARGET%" >nul 2>&1\r\n'
         "if not errorlevel 1 goto installed\r\n"
@@ -2026,11 +2119,13 @@ def build_windows_swap_script(new_exe, target_exe, wait_seconds: int = 120,
         "ping -n 2 127.0.0.1 >nul\r\n"
         "goto waitloop\r\n"
         ":installed\r\n"
-        f"{backup_lines}"
         'del "%NEW%" >nul 2>&1\r\n'
         'start "" "%TARGET%"\r\n'
         '(goto) 2>nul & del "%~f0"\r\n'
         ":giveup\r\n"
+        "rem The swap never succeeded: bring the existing build back up so the\r\n"
+        "rem user is not left without a working program.\r\n"
+        'start "" "%TARGET%"\r\n'
         "exit /b 1\r\n"
     )
 
@@ -2039,13 +2134,18 @@ def build_posix_swap_script(new_exe, target_exe, pid: int = 0) -> str:
     """A detached shell script that swaps in the new build after the app exits.
 
     Kept for completeness (development builds on Linux/macOS); the packaged
-    application is Windows-only.
+    application is Windows-only. Like the Windows script it clears the
+    PyInstaller onefile variables before relaunching, so the new build unpacks
+    its own files.
     """
+    unset_lines = "".join(f"unset {name}\n" for name in PYINSTALLER_RUNTIME_ENV_VARS)
     return (
         "#!/bin/sh\n"
         f'NEW="{new_exe}"\n'
         f'TARGET="{target_exe}"\n'
         f"PID={int(pid)}\n"
+        f"export {PYINSTALLER_RESET_ENV_VAR}=1\n"
+        f"{unset_lines}"
         "i=0\n"
         'while kill -0 "$PID" 2>/dev/null; do\n'
         "  i=$((i+1))\n"
@@ -2069,17 +2169,23 @@ def build_swap_script(new_exe, target_exe, pid: int = 0, *, windows: bool = None
 
 
 def launch_swap_script(script_path: Path, *, windows: bool = None) -> None:
-    """Run the swap script detached, so it survives this process exiting."""
+    """Run the swap script detached, so it survives this process exiting.
+
+    The script is started with a scrubbed environment (`restart_environment`),
+    so everything it starts later — including the new build — is launched as
+    if the user had double-clicked it.
+    """
     on_windows = (os.name == "nt") if windows is None else windows
+    env = restart_environment()
     if on_windows:
         creationflags = 0
         for flag in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP"):
             creationflags |= getattr(subprocess, flag, 0)
         subprocess.Popen(["cmd", "/c", str(script_path)], close_fds=True,
-                         creationflags=creationflags)
+                         env=env, creationflags=creationflags)
     else:
         subprocess.Popen(["/bin/sh", str(script_path)], start_new_session=True,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def install_update_and_restart(new_exe, target_exe=None, *, windows: bool = None,
@@ -3964,6 +4070,13 @@ class AutoTyperApp(_TkBase):
 # =============================================================================
 
 def main(argv=None):
+    # Drop PyInstaller's onefile bookkeeping before anything else happens:
+    # every process this program starts (the update swap script, a file
+    # manager, a helper such as pbpaste) then inherits a clean environment,
+    # and a restarted build unpacks its own files. See the notes on
+    # `restart_environment` at the top of section 10.
+    scrub_pyinstaller_runtime_environment()
+
     ap = argparse.ArgumentParser(description="AutoTyper: Biomechanical Keystroke Simulator")
     ap.add_argument("--benchmark", action="store_true", help="simulate trace and print biomechanical metrics")
     ap.add_argument("--wpm", type=int, default=110, help="target typing speed in words per minute")
