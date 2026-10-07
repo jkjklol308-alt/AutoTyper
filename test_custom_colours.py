@@ -28,8 +28,8 @@ MODULE_PATH = Path(__file__).resolve().parent / "auto_typer.py"
 # Pure model
 # ---------------------------------------------------------------------------
 class VersionTests(unittest.TestCase):
-    def test_version_is_1_0_0(self):
-        self.assertEqual(v2.APP_VERSION, "1.0.0")
+    def test_version_is_1_1_0(self):
+        self.assertEqual(v2.APP_VERSION, "1.1.0")
 
     def test_warm_terracotta_removed_and_order_shifted(self):
         names = list(v2.PALETTE_DEFINITIONS)
@@ -201,7 +201,7 @@ class CustomPaletteStorageTests(unittest.TestCase):
 # Miniature Tk stub so the widgets can be built headlessly
 # ---------------------------------------------------------------------------
 class _StubError(Exception):
-    pass
+    """Stands in for ``tkinter.TclError``."""
 
 
 class _StubInterp:
@@ -211,28 +211,162 @@ class _StubInterp:
         raise _StubError("no interpreter in the stub")
 
 
+# ---------------------------------------------------------------------------
+# Tk option tables. The stub validates every option name against these, so a
+# widget that is configured with something real Tk would reject (a ``bg`` on a
+# ttk widget, an ``fg`` on a Frame, a Button-only option on a Label...) raises
+# here exactly as it would on a desktop.
+# ---------------------------------------------------------------------------
+_COMMON_WIDGET_OPTIONS = {
+    "class", "cursor", "name", "takefocus", "highlightbackground", "highlightcolor",
+    "highlightthickness", "relief", "borderwidth", "background", "width", "height",
+    "padx", "pady", "bd",
+}
+_FRAME_OPTIONS = _COMMON_WIDGET_OPTIONS | {"colormap", "container", "visual"}
+_LABEL_OPTIONS = (_COMMON_WIDGET_OPTIONS | {
+    "anchor", "bitmap", "compound", "disabledforeground", "font", "foreground",
+    "image", "justify", "state", "text", "textvariable", "underline", "wraplength",
+})
+_LABELFRAME_OPTIONS = _FRAME_OPTIONS | {
+    "foreground", "font", "labelanchor", "labelwidget", "text",
+}
+_BUTTON_OPTIONS = {
+    "activebackground", "activeforeground", "anchor", "background", "bd", "bitmap",
+    "borderwidth", "command", "compound", "cursor", "default", "disabledforeground",
+    "font", "foreground", "height", "highlightbackground", "highlightcolor",
+    "highlightthickness", "image", "justify", "name", "overrelief", "padx", "pady",
+    "relief", "repeatdelay", "repeatinterval", "state", "takefocus", "text",
+    "textvariable", "underline", "width", "wraplength", "class",
+}
+_TOGGLE_OPTIONS = _BUTTON_OPTIONS | {
+    "indicatoron", "offvalue", "onvalue", "selectcolor", "selectimage", "variable",
+    "value",
+}
+_ENTRY_OPTIONS = {
+    "background", "bd", "borderwidth", "class", "cursor", "disabledbackground",
+    "disabledforeground", "exportselection", "font", "foreground", "highlightbackground",
+    "highlightcolor", "highlightthickness", "insertbackground", "insertborderwidth",
+    "insertofftime", "insertontime", "insertwidth", "invalidcommand", "justify", "name",
+    "readonlybackground", "relief", "selectbackground", "selectborderwidth",
+    "selectforeground", "show", "state", "takefocus", "textvariable", "validate",
+    "validatecommand", "width", "xscrollcommand",
+}
+_SCALE_OPTIONS = {
+    "activebackground", "background", "bd", "bigincrement", "borderwidth", "class",
+    "command", "cursor", "digits", "font", "foreground", "from", "highlightbackground",
+    "highlightcolor", "highlightthickness", "label", "length", "name", "orient", "relief",
+    "repeatdelay", "repeatinterval", "resolution", "showvalue", "sliderlength",
+    "sliderrelief", "state", "takefocus", "tickinterval", "to", "troughcolor", "variable",
+    "width",
+}
+_TEXT_OPTIONS = {
+    "autoseparators", "background", "bd", "blockcursor", "borderwidth", "class", "cursor",
+    "endline", "exportselection", "font", "foreground", "height", "highlightbackground",
+    "highlightcolor", "highlightthickness", "inactiveselectbackground", "insertbackground",
+    "insertborderwidth", "insertofftime", "insertontime", "insertwidth", "maxundo", "name",
+    "padx", "pady", "relief", "selectbackground", "selectborderwidth", "selectforeground",
+    "setgrid", "spacing1", "spacing2", "spacing3", "state", "tabs", "tabstyle", "takefocus",
+    "undo", "width", "wrap", "xscrollcommand", "yscrollcommand",
+}
+_CANVAS_OPTIONS = {
+    "background", "bd", "borderwidth", "class", "closeenough", "confine", "cursor",
+    "height", "highlightbackground", "highlightcolor", "highlightthickness",
+    "insertbackground", "insertborderwidth", "insertofftime", "insertontime",
+    "insertwidth", "name", "offset", "relief", "scrollregion", "selectbackground",
+    "selectborderwidth", "selectforeground", "state", "takefocus", "width",
+    "xscrollcommand", "xscrollincrement", "yscrollcommand", "yscrollincrement",
+}
+_TOPLEVEL_OPTIONS = {
+    "background", "bd", "borderwidth", "class", "colormap", "container", "cursor",
+    "height", "highlightbackground", "highlightcolor", "highlightthickness", "menu",
+    "name", "padx", "pady", "relief", "screen", "takefocus", "use", "visual", "width",
+}
+# ttk widgets reject the classic tk colours: they are styled through ttk.Style.
+_TTK_BASE = {"class", "cursor", "padding", "style", "takefocus", "name"}
+_TTK_OPTIONS = {
+    "ttk.Frame": _TTK_BASE | {"borderwidth", "height", "relief", "width"},
+    "ttk.LabelFrame": _TTK_BASE | {"borderwidth", "height", "labelanchor", "relief",
+                                   "text", "underline", "width"},
+    "ttk.Label": _TTK_BASE | {"anchor", "background", "compound", "font", "foreground",
+                              "image", "justify", "state", "text", "textvariable",
+                              "underline", "width", "wraplength"},
+    "ttk.Button": _TTK_BASE | {"command", "compound", "default", "image", "state",
+                               "text", "textvariable", "underline", "width"},
+    "ttk.Entry": {"class", "cursor", "exportselection", "font", "invalidcommand",
+                  "justify", "name", "show", "state", "style", "takefocus",
+                  "textvariable", "validate", "validatecommand", "width",
+                  "xscrollcommand"},
+    "ttk.Combobox": {"class", "cursor", "exportselection", "font", "height",
+                     "invalidcommand", "justify", "name", "postcommand", "show", "state",
+                     "style", "takefocus", "textvariable", "validate", "validatecommand",
+                     "values", "width", "xscrollcommand"},
+    "ttk.Spinbox": {"class", "command", "cursor", "exportselection", "font", "format",
+                    "from", "increment", "invalidcommand", "justify", "name", "show",
+                    "state", "style", "takefocus", "textvariable", "to", "validate",
+                    "validatecommand", "values", "width", "wrap", "xscrollcommand"},
+    "ttk.Checkbutton": {"class", "command", "compound", "cursor", "image", "name",
+                        "offvalue", "onvalue", "padding", "state", "style", "takefocus",
+                        "text", "textvariable", "underline", "variable", "width"},
+    "ttk.Radiobutton": {"class", "command", "compound", "cursor", "image", "name",
+                        "padding", "state", "style", "takefocus", "text", "textvariable",
+                        "underline", "value", "variable", "width"},
+    "ttk.Progressbar": {"class", "cursor", "length", "maximum", "mode", "name", "orient",
+                        "phase", "style", "takefocus", "value", "variable"},
+    "ttk.Scrollbar": {"class", "command", "cursor", "name", "orient", "style", "takefocus"},
+    "ttk.Separator": {"class", "cursor", "name", "orient", "style", "takefocus"},
+    "ttk.Notebook": {"class", "cursor", "height", "name", "padding", "style", "takefocus",
+                     "width"},
+    "ttk.Treeview": {"class", "columns", "cursor", "displaycolumns", "height", "name",
+                     "padding", "selectmode", "show", "style", "takefocus",
+                     "xscrollcommand", "yscrollcommand"},
+}
+_ALIASES = {"bg": "background", "fg": "foreground", "bd": "borderwidth"}
+
+
+def _canonical(option: str) -> str:
+    """``from_`` -> ``from``, ``bg`` -> ``background``, as Tk does."""
+    name = option.rstrip("_")
+    return _ALIASES.get(name, name)
+
+
 class _StubWidget:
     tk = _StubInterp()
+    OPTIONS = _FRAME_OPTIONS
+    KIND = "widget"
 
     def __init__(self, master=None, **kwargs):
         self.master = master
-        self.kw = dict(kwargs)
+        self.kw = {}
         self.children = []
         self.bindings = {}
         self.destroyed = False
+        self._check_options(kwargs)
+        self.kw.update({_canonical(key): value for key, value in kwargs.items()})
         if isinstance(master, _StubWidget):
             master.children.append(self)
 
+    def _check_options(self, options):
+        for option in options:
+            name = _canonical(option)
+            if name not in self.OPTIONS:
+                raise _StubError(
+                    f"unknown option -{name} for {self.KIND} "
+                    f"(valid: {sorted(self.OPTIONS)[:6]}...)")
+
     # configuration -----------------------------------------------------
     def configure(self, cnf=None, **kwargs):
-        self.kw.update(kwargs)
+        self._check_options(kwargs)
+        self.kw.update({_canonical(key): value for key, value in kwargs.items()})
     config = configure
 
     def cget(self, key):
-        return self.kw.get(key)
+        return self.kw.get(_canonical(key))
 
     def __getitem__(self, key):
-        return self.kw.get(key)
+        return self.kw.get(_canonical(key))
+
+    def __setitem__(self, key, value):
+        self.kw[_canonical(key)] = value
 
     # geometry managers --------------------------------------------------
     def pack(self, **kwargs):
@@ -242,9 +376,31 @@ class _StubWidget:
     def pack_propagate(self, flag=None):
         pass
 
+    def pack_forget(self):
+        pass
+    grid_forget = place_forget = pack_forget
+
     def columnconfigure(self, *args, **kwargs):
         pass
     rowconfigure = columnconfigure
+
+    # notebook surface (tabbed pickers / guide)
+    def add(self, child, **kwargs):
+        self.children.append(child)
+        self.tabs_list = getattr(self, "tabs_list", []) + [child]
+
+    def select(self, child=None):
+        self.selected_tab = child
+        return child
+
+    def index(self, child):
+        return getattr(self, "tabs_list", []).index(child)
+
+    def tabs(self):
+        return tuple(getattr(self, "tabs_list", []))
+
+    def enable_traversal(self):
+        pass
 
     # events -------------------------------------------------------------
     def bind(self, sequence, func=None, add=None):
@@ -278,8 +434,32 @@ class _StubWidget:
     def wm_attributes(self, *args):
         pass
 
+    def wm_overrideredirect(self, *args):
+        pass
+
+    def wm_geometry(self, *args):
+        pass
+
+    def winfo_rootx(self):
+        return 0
+
+    def winfo_rooty(self):
+        return 0
+
+    def winfo_width(self):
+        return 640
+
+    def winfo_height(self):
+        return 24
+
     def after(self, delay, func=None, *args):
-        return "after#1"
+        # Delayed work is recorded, not run: a real main loop would execute it
+        # later, but firing it inline would recurse (the app re-arms its queue
+        # poll from inside the callback). Tests that care about a callback call
+        # it directly.
+        self.pending_after = getattr(self, "pending_after", [])
+        self.pending_after.append((delay, func, args))
+        return f"after#{len(self.pending_after)}"
 
     def after_cancel(self, identifier):
         pass
@@ -320,17 +500,58 @@ class _StubWidget:
 
 
 class _StubCanvas(_StubWidget):
+    OPTIONS = _CANVAS_OPTIONS
+    KIND = "canvas"
+    ITEM_OPTIONS = {"anchor", "dash", "dashoffset", "disableddash", "disabledfill",
+                    "disabledoutline", "disabledstipple", "disabledwidth", "extent",
+                    "fill", "joinstyle", "offset", "outline", "outlineoffset",
+                    "outlinestipple", "smooth", "splinesteps", "start", "state",
+                    "stipple", "tags", "text", "width", "capstyle", "arrow", "arrowshape"}
+
     def __init__(self, master=None, **kwargs):
         super().__init__(master, **kwargs)
         self.items = {}
         self.item_bindings = {}
         self._next_id = 1
 
-    def create_polygon(self, points, **kwargs):
+    def _check_item_options(self, kwargs):
+        for option in kwargs:
+            if option not in self.ITEM_OPTIONS:
+                raise _StubError(f"unknown canvas item option -{option}")
+
+    def _create_item(self, kind, coords, **kwargs):
+        self._check_item_options(kwargs)
         item = self._next_id
         self._next_id += 1
-        self.items[item] = {"points": list(points), **kwargs}
+        self.items[item] = {"kind": kind, "points": list(coords), **kwargs}
         return item
+
+    def create_polygon(self, points, **kwargs):
+        return self._create_item("polygon", points, **kwargs)
+
+    def create_rectangle(self, *coords, **kwargs):
+        return self._create_item("rectangle", coords, **kwargs)
+
+    def create_oval(self, *coords, **kwargs):
+        return self._create_item("oval", coords, **kwargs)
+
+    def create_line(self, *coords, **kwargs):
+        return self._create_item("line", coords, **kwargs)
+
+    def create_text(self, *coords, **kwargs):
+        return self._create_item("text", coords, **kwargs)
+
+    def coords(self, item, *args):
+        if args:
+            self.items.setdefault(item, {})["points"] = list(args)
+        return self.items.get(item, {}).get("points", [])
+
+    def delete(self, *items):
+        for item in items:
+            if item == "all":
+                self.items.clear()
+            else:
+                self.items.pop(item, None)
 
     def create_window(self, *args, **kwargs):
         item = self._next_id
@@ -342,8 +563,12 @@ class _StubCanvas(_StubWidget):
         self.item_bindings.setdefault((item, sequence), []).append(func)
 
     def itemconfigure(self, item, **kwargs):
+        self._check_item_options(kwargs)
         self.items.setdefault(item, {}).update(kwargs)
     itemconfig = itemconfigure
+
+    def find_overlapping(self, *args):
+        return []
 
     def tag_raise(self, item):
         pass
@@ -393,20 +618,26 @@ class _StubVariable:
         self._value = value
 
 
+def _widget_class(kind, options, base=_StubWidget):
+    """A stub widget class that only accepts the options real Tk accepts."""
+    return type(kind, (base,), {"OPTIONS": frozenset(options), "KIND": kind.lower()})
+
+
 def _make_tk_stub():
     tk_module = types.ModuleType("tkinter")
     tk_module.TclError = _StubError
-    tk_module.Tk = _StubWidget
-    tk_module.Toplevel = _StubWidget
-    tk_module.Frame = _StubWidget
-    tk_module.LabelFrame = _StubWidget
-    tk_module.Label = _StubWidget
-    tk_module.Button = _StubWidget
-    tk_module.Entry = _StubWidget
-    tk_module.Radiobutton = _StubWidget
-    tk_module.Checkbutton = _StubWidget
-    tk_module.Scale = _StubWidget
-    tk_module.Text = _StubWidget
+    tk_module.Tk = _widget_class("Tk", _TOPLEVEL_OPTIONS)
+    tk_module.Toplevel = _widget_class("Toplevel", _TOPLEVEL_OPTIONS)
+    tk_module.Frame = _widget_class("Frame", _FRAME_OPTIONS)
+    tk_module.LabelFrame = _widget_class("LabelFrame", _LABELFRAME_OPTIONS)
+    tk_module.Label = _widget_class("Label", _LABEL_OPTIONS)
+    tk_module.Button = _widget_class("Button", _BUTTON_OPTIONS)
+    tk_module.Entry = _widget_class("Entry", _ENTRY_OPTIONS)
+    tk_module.Radiobutton = _widget_class("Radiobutton", _TOGGLE_OPTIONS)
+    tk_module.Checkbutton = _widget_class("Checkbutton", _TOGGLE_OPTIONS)
+    tk_module.Scale = _widget_class("Scale", _SCALE_OPTIONS)
+    tk_module.Text = _widget_class("Text", _TEXT_OPTIONS)
+    tk_module.Menu = _widget_class("Menu", _COMMON_WIDGET_OPTIONS | {"tearoff", "title"})
     tk_module.Canvas = _StubCanvas
     tk_module.StringVar = _StubVariable
     tk_module.BooleanVar = _StubVariable
@@ -419,7 +650,8 @@ def _make_tk_stub():
     for name in ("Frame", "Label", "Button", "Entry", "Combobox", "Spinbox",
                  "Progressbar", "Scrollbar", "Notebook", "Labelframe", "LabelFrame",
                  "Checkbutton", "Radiobutton", "Separator"):
-        setattr(ttk_module, name, _StubWidget)
+        options = _TTK_OPTIONS.get(f"ttk.{name}", _TTK_BASE)
+        setattr(ttk_module, name, _widget_class(f"ttk{name}", options))
     ttk_module.Style = _StubStyle
 
     messagebox_module = types.ModuleType("tkinter.messagebox")

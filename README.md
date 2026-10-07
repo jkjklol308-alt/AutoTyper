@@ -81,17 +81,42 @@ python auto_typer.py --benchmark --wpm 100 --seed 42 --csv trace.csv --coding-mo
 python -m unittest test_auto_typer.py test_custom_colours.py test_update_checker.py
 ```
 
-`test_auto_typer.py` replays planned traces through a virtual editor to prove the emitted keystrokes reproduce the source text exactly, `test_update_checker.py` covers the release lookup, the download/verification path and the self-update swap, and `test_custom_colours.py` exercises the colour picker through a miniature `tkinter` stub so the suite runs with no display.
+`test_auto_typer.py` replays planned traces through a virtual editor to prove the emitted keystrokes reproduce the source text exactly, `test_update_checker.py` covers the release lookup, the download/verification path and the self-update swap, `test_custom_colours.py` exercises the palette bookkeeping through a miniature `tkinter` stub, and `test_guide_ui.py` covers the colour studio, the guide and the tidied main window — so the whole suite runs with no display.
+
+## The in-app guide
+
+Press **❓ Guide** in the header, hit **F1**, or just launch AutoTyper for the first time — the guide opens automatically once and explains every control in the app, from *Target speed* to the colour studio.
+
+- Around 70 topics across sections such as **Typing settings**, **Source text panel**, **Running a job**, **Settings window**, **The colour studio**, **Keyboard shortcuts** and **Troubleshooting**.
+- **Search box** at the top: type `wpm`, `typo`, `palette`, `stop`… and only the matching topics stay on screen, with a live “showing X of Y topics” count.
+- Nothing is hidden behind a manual: any control added to the window is expected to appear in the guide, and `test_guide_ui.py` fails if the documentation list is left behind.
 
 ## Custom UI Colours
 
-![The colour hexagon used by the custom colour picker](docs/colour-hexagon.png)
+![The colour studio’s gradient field, tints and shades ramp and 48-swatch board](docs/colour-studio.png)
 
-Appearance settings live in ⚙ Settings:
+Appearance settings live in ⚙ Settings. Press **🎨 New colours…** to open the **colour studio**: three pickers for the same colour, a role selector, a live preview and a name.
 
-- **Custom “UI colour” section**: press **🎨 New colours…** to open the editor, which uses the *Microsoft Paint / Office style colour hexagon* — a honeycomb of discrete hexagonal swatches (white in the middle, tints fanning out by hue, darker shades on the rim) plus a black‑to‑white hexagon strip. It is deliberately **not** the gradient/"Define Custom Colors" square.
-- Choose a **Primary**, **Accent** and **Background** colour (click a hexagon or type `#RRGGBB`), watch the live preview, give the set a name, and **Save colours**.
-- Saved palettes appear in the palette grid marked with a ★, are applied instantly, survive restarts (stored in `~/.autotyper_settings.json`; settings from earlier releases under the old file name are picked up automatically), and can be re-opened for editing by double-clicking a card or pressing **Edit selected**. **Delete selected** removes one; built-in palettes cannot be deleted. Up to 16 custom palettes are kept.
+| Tab | What it gives you |
+| --- | --- |
+| **Gradient** | The Microsoft-Paint “Define Custom Colors” square — hue left to right, saturation top to bottom — plus a **brightness bar** down its right-hand side, so the full colour range (not just a fixed set of swatches) is one click away. Click and drag; the crosshair marks where you are. |
+| **Swatches** | Paint’s **48 basic colours** in four rows of twelve: the full-saturation hues, their pastel tints, their deep shades, and the white-to-black neutral ramp. |
+| **Hexagon** | The honeycomb of discrete shades (white centre, tints fanning out by hue, dark shades on the rim) with a black-to-white hexagon strip underneath. |
+
+Underneath every tab sits the **Tints & shades** ramp: eleven steps of the colour being edited, from pastel tints through the pure colour to deep shades and black. One click applies a lighter or darker version of exactly the same hue — no hunting around the square.
+
+- Choose whether the next colour fills **Primary** (headings, buttons), **Accent** (highlights, progress, selections) or **Background** (window, panels, text area). Readable foregrounds are derived automatically, so text never ends up invisible.
+- Type any hex (`#RGB`, `#RRGGBB`, with or without the `#`) into the **Hex** box and press **Use hex**; the **RGB readout** shows the channels you are editing.
+- Watch the **live preview**, name the set and press **Save colours**. Saved palettes appear in the palette grid marked with a ★, are applied instantly, survive restarts (stored in `~/.autotyper_settings.json`; settings from earlier releases under the old file name are picked up automatically), and can be re-opened for editing by double-clicking a card or pressing **Edit selected**. **Delete selected** removes one; built-in palettes cannot be deleted. Up to 16 custom palettes are kept.
+
+## A tidier window
+
+The main window is grouped into three cards — **Typing speed**, **Editor behaviour** and **Text to type** — with the run controls in the footer:
+
+- a character/line counter next to the text toolbar, so you can see exactly how much text is loaded;
+- hover help on the controls that need it, and a footer reminder of the shortcuts;
+- **Ctrl+Enter** starts a job, **Esc** stops it, **F1** opens the guide and **Ctrl+A** selects the source text;
+- one shared palette registry paints the whole interface (and any open settings, guide or colour-studio window) the moment you switch palette.
 
 ## Building the executable yourself
 
@@ -100,4 +125,4 @@ pip install pyinstaller pynput
 pyinstaller AutoTyper.spec --noconfirm     # -> dist/AutoTyper.exe
 ```
 
-Pushing a tag that matches `APP_VERSION` (for example `v1.0.0`) makes GitHub Actions run the tests, build the executable and attach it to a release automatically — see `.github/workflows/release.yml`.
+Pushing a tag that matches `APP_VERSION` (for example `v1.1.0`) makes GitHub Actions run the tests, build the executable and attach it to a release automatically — see `.github/workflows/release.yml`.

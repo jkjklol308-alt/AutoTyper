@@ -70,7 +70,7 @@ try:
 except ImportError:
     tk = messagebox = ttk = None
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 APP_NAME = "AutoTyper"
 GITHUB_REPO = "jkjklol308-alt/AutoTyper"
 EXE_ASSET_NAME = "AutoTyper.exe"
@@ -2169,10 +2169,16 @@ PALETTE_DEFINITIONS = {
 
 
 def _colour_is_dark(colour: str) -> bool:
-    """Return whether a hex colour needs a light foreground."""
-    value = colour.lstrip("#")
-    r, g, b = (int(value[index:index + 2], 16) for index in (0, 2, 4))
-    return (0.299 * r + 0.587 * g + 0.114 * b) < 145
+    """Return whether a hex colour needs a light foreground.
+
+    Anything that is not a usable colour is treated as light, so a hand-edited
+    settings file can never make text unreadable.
+    """
+    rgb = hex_to_rgb(colour)
+    if rgb is None:
+        return False
+    red, green, blue = rgb
+    return (0.299 * red + 0.587 * green + 0.114 * blue) < 145
 
 
 DEFAULT_PALETTE = "Trust Corporate"
@@ -2215,6 +2221,17 @@ GREYSCALE_STEPS = 13         # black -> white strip underneath the honeycomb
 MAX_CUSTOM_PALETTES = 16     # guard against an unbounded settings file
 CUSTOM_PALETTE_ROLES = ("primary", "accent", "background")
 
+# Paint-style gradient field ("Define Custom Colors"): hue runs left to right,
+# saturation top to bottom, and the separate bar on its right controls the
+# brightness the whole square is painted with.
+GRADIENT_COLUMNS = 42        # hue steps across the gradient field
+GRADIENT_ROWS = 28           # saturation steps down the gradient field
+GRADIENT_CELL = 6            # pixels per gradient cell (42 * 6 = 252 wide)
+BRIGHTNESS_STEPS = 24        # cells in the Paint luminosity bar
+PAINT_SWATCH_COLUMNS = 12    # "Basic colors" board: four rows of twelve
+PAINT_SWATCH_ROWS = 4
+SHADE_STEPS = 11             # white -> pure colour -> black, per colour
+
 _HEX_COLOUR_RE = re.compile(r"^#?([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$")
 
 # Axial (q, r) neighbour directions for a pointy-top hexagonal grid.
@@ -2253,6 +2270,96 @@ def hsv_to_hex(hue: float, saturation: float, value: float) -> str:
     r, g, b = colorsys.hsv_to_rgb(hue % 1.0, min(max(saturation, 0.0), 1.0),
                                   min(max(value, 0.0), 1.0))
     return "#{:02X}{:02X}{:02X}".format(round(r * 255), round(g * 255), round(b * 255))
+
+
+def hex_to_rgb(colour: str) -> Optional[Tuple[int, int, int]]:
+    """Split a hex colour into its 0-255 red, green and blue channels."""
+    normalised = normalise_hex_colour(colour)
+    if normalised is None:
+        return None
+    return (int(normalised[1:3], 16), int(normalised[3:5], 16), int(normalised[5:7], 16))
+
+
+def rgb_to_hex(red: float, green: float, blue: float) -> str:
+    """Build a ``#RRGGBB`` string from 0-255 channels, clamped for safety."""
+    channels = []
+    for channel in (red, green, blue):
+        try:
+            value = float(channel)
+        except (TypeError, ValueError):
+            value = 0.0
+        channels.append(int(round(max(0.0, min(255.0, value)))))
+    return "#{:02X}{:02X}{:02X}".format(*channels)
+
+
+def hsv_from_hex(colour: str) -> Optional[Tuple[float, float, float]]:
+    """Hue, saturation and brightness (each 0..1) of a hex colour."""
+    rgb = hex_to_rgb(colour)
+    if rgb is None:
+        return None
+    return colorsys.rgb_to_hsv(*(channel / 255.0 for channel in rgb))
+
+
+def format_rgb(colour: str) -> str:
+    """Human-readable channel readout, e.g. ``"RGB 30 58 138"``."""
+    rgb = hex_to_rgb(colour)
+    if rgb is None:
+        return "RGB —"
+    return "RGB {:3d} {:3d} {:3d}".format(*rgb)
+
+
+def build_shade_ramp(hue: float, saturation: float, value: float,
+                     steps: int = SHADE_STEPS) -> List[str]:
+    """Tints and shades of one colour: white → tints → pure → shades → black.
+
+    This is the strip that sits under the gradient field, so a colour can be
+    nudged lighter or darker in a single click instead of hunting for the same
+    hue on a different part of the square.
+    """
+    steps = max(3, steps)
+    middle = steps // 2
+    ramp: List[str] = []
+    for index in range(steps):
+        if index < middle:
+            amount = (middle - index) / middle           # 1.0 = white
+            ramp.append(hsv_to_hex(hue,
+                                   saturation * (1.0 - amount),
+                                   value + (1.0 - value) * amount))
+        elif index == middle:
+            ramp.append(hsv_to_hex(hue, saturation, value))
+        else:
+            depth = (index - middle) / (steps - 1 - middle)
+            ramp.append(hsv_to_hex(hue, saturation, value * (1.0 - depth)))
+    return ramp
+
+
+def build_brightness_ramp(hue: float, saturation: float,
+                          steps: int = BRIGHTNESS_STEPS) -> List[str]:
+    """Brightness bar colours, brightest at the top down to black."""
+    steps = max(2, steps)
+    return [hsv_to_hex(hue, saturation, 1.0 - index / (steps - 1))
+            for index in range(steps)]
+
+
+def build_paint_basic_palette() -> List[str]:
+    """The 48-swatch "basic colours" board, laid out like Paint's.
+
+    Four rows of twelve:
+
+    * row 1 — the twelve hues of the colour wheel at full saturation,
+    * row 2 — light tints of the same hues (pastels),
+    * row 3 — deep shades of the same hues,
+    * row 4 — the neutral ramp, white through to black.
+    """
+    hues = [index / PAINT_SWATCH_COLUMNS for index in range(PAINT_SWATCH_COLUMNS)]
+    vivid = [hsv_to_hex(hue, 1.0, 1.0) for hue in hues]
+    tints = [hsv_to_hex(hue, 0.32, 1.0) for hue in hues]
+    shades = [hsv_to_hex(hue, 0.88, 0.55) for hue in hues]
+    neutrals = [hsv_to_hex(0.0, 0.0, 1.0 - index / (PAINT_SWATCH_COLUMNS - 1))
+                for index in range(PAINT_SWATCH_COLUMNS)]
+    board = vivid + tints + shades + neutrals
+    assert len(board) == PAINT_SWATCH_COLUMNS * PAINT_SWATCH_ROWS
+    return board
 
 
 def hexagon_ring_colour(ring: int, rings: int, hue: float) -> str:
@@ -2494,12 +2601,550 @@ class ColourHexagonPicker(_TkFrame):
         return [self._item_colour[item] for item in sorted(self._item_colour)]
 
 
+class ColourShadeStrip(_TkFrame):
+    """A tints-and-shades ramp for one colour: white → pure → black.
+
+    Sits under the gradient field and lets a colour be nudged lighter or
+    darker with a single click, without having to find the same hue again on a
+    different row of the square.
+    """
+
+    def __init__(self, master, *, on_pick=None, steps: int = SHADE_STEPS,
+                 swatch: Tuple[int, int] = (24, 20), gap: int = 2,
+                 background: str = "#FFFFFF", outline: str = "#8C96A8",
+                 highlight: str = "#111827", **kwargs):
+        super().__init__(master, bg=background, **kwargs)
+        self._on_pick = on_pick
+        self.steps = max(3, steps)
+        self._swatch_w, self._swatch_h = swatch
+        self._gap = gap
+        self._outline = outline
+        self._highlight = highlight
+        self._colours: List[str] = []
+        self._item_colour: Dict[int, str] = {}
+        self._colour_items: Dict[str, List[int]] = {}
+        self._selected_item: Optional[int] = None
+        self.selected_colour: Optional[str] = None
+
+        width = self.steps * (self._swatch_w + self._gap) - self._gap
+        self.canvas = tk.Canvas(self, width=width, height=self._swatch_h,
+                                bg=background, highlightthickness=0, bd=0)
+        self.canvas.pack()
+        self.set_base_colour("#3B82F6")
+
+    # -- model ---------------------------------------------------------
+    def set_base_colour(self, colour: str):
+        """Rebuild the ramp around ``colour`` (no callback fired)."""
+        hsv = hsv_from_hex(colour)
+        if hsv is None:
+            hsv = (0.58, 0.85, 0.9)
+        self._colours = build_shade_ramp(*hsv, steps=self.steps)
+        self._draw_ramp()
+
+    def swatch_colours(self) -> List[str]:
+        """Every colour on the ramp, lightest first."""
+        return list(self._colours)
+
+    def _draw_ramp(self):
+        try:
+            self.canvas.delete("all")
+        except tk.TclError:
+            return
+        self._item_colour = {}
+        self._colour_items = {}
+        self._selected_item = None
+        for index, colour in enumerate(self._colours):
+            x0 = index * (self._swatch_w + self._gap)
+            item = self.canvas.create_rectangle(
+                x0, 0, x0 + self._swatch_w, self._swatch_h,
+                fill=colour, outline=self._outline, width=1)
+            self._item_colour[item] = colour
+            self._colour_items.setdefault(colour, []).append(item)
+            self.canvas.tag_bind(item, "<Button-1>", lambda event, i=item: self._clicked(i))
+            self.canvas.tag_bind(item, "<Enter>",
+                                 lambda event: self.canvas.configure(cursor="hand2"))
+            self.canvas.tag_bind(item, "<Leave>",
+                                 lambda event: self.canvas.configure(cursor=""))
+        self.set_selected(self.selected_colour)
+
+    # -- interaction ---------------------------------------------------
+    def _clicked(self, item: int):
+        colour = self._item_colour.get(item)
+        if colour is None:
+            return
+        self.selected_colour = colour
+        self._highlight_item(item)
+        if self._on_pick is not None:
+            self._on_pick(colour)
+
+    def _highlight_item(self, item: Optional[int]):
+        if self._selected_item is not None:
+            try:
+                self.canvas.itemconfigure(self._selected_item,
+                                          outline=self._outline, width=1)
+            except tk.TclError:
+                pass
+        self._selected_item = item
+        if item is not None:
+            try:
+                self.canvas.itemconfigure(item, outline=self._highlight, width=3)
+                self.canvas.tag_raise(item)
+            except tk.TclError:
+                pass
+
+    def set_selected(self, colour: Optional[str]):
+        """Outline the swatch holding ``colour`` (no callback fired)."""
+        normalised = normalise_hex_colour(colour) if colour else None
+        self.selected_colour = normalised
+        items = self._colour_items.get(normalised or "", [])
+        self._highlight_item(items[0] if items else None)
+
+
+class ColourSwatchBoard(_TkFrame):
+    """Paint's "basic colours" board: four rows of twelve clickable swatches.
+
+    Row 1 holds the twelve colour-wheel hues at full saturation, row 2 their
+    pastel tints, row 3 their deep shades and row 4 the neutral ramp from
+    white to black — the quick, chunky starting points of the classic Paint
+    dialog, with the gradient field for everything in between.
+    """
+
+    def __init__(self, master, *, colours: Optional[List[str]] = None,
+                 on_pick=None, columns: int = PAINT_SWATCH_COLUMNS,
+                 swatch: Tuple[int, int] = (20, 17), gap: int = 3,
+                 background: str = "#FFFFFF", outline: str = "#8C96A8",
+                 highlight: str = "#111827", hover: str = "#111827", **kwargs):
+        super().__init__(master, bg=background, **kwargs)
+        self._on_pick = on_pick
+        self.columns = max(1, columns)
+        self._swatch_w, self._swatch_h = swatch
+        self._gap = gap
+        self._outline = outline
+        self._highlight = highlight
+        self._hover = hover
+        self._colours = list(colours) if colours else build_paint_basic_palette()
+        self._item_colour: Dict[int, str] = {}
+        self._colour_items: Dict[str, List[int]] = {}
+        self._items: List[int] = []
+        self._selected_item: Optional[int] = None
+        self._hover_item: Optional[int] = None
+        self.selected_colour: Optional[str] = None
+
+        rows = max(1, math.ceil(len(self._colours) / self.columns))
+        width = self.columns * (self._swatch_w + self._gap) - self._gap
+        height = rows * (self._swatch_h + self._gap) - self._gap
+        self.canvas = tk.Canvas(self, width=width, height=height, bg=background,
+                                highlightthickness=0, bd=0)
+        self.canvas.pack()
+        self.canvas.bind("<Motion>", self._motion)
+        self.canvas.bind("<Leave>", self._leave)
+        self._draw_board()
+
+    # -- model ---------------------------------------------------------
+    def swatch_colours(self) -> List[str]:
+        """Every colour on the board, in reading order."""
+        return list(self._colours)
+
+    def _draw_board(self):
+        for index, colour in enumerate(self._colours):
+            row, column = divmod(index, self.columns)
+            x0 = column * (self._swatch_w + self._gap)
+            y0 = row * (self._swatch_h + self._gap)
+            item = self.canvas.create_rectangle(
+                x0, y0, x0 + self._swatch_w, y0 + self._swatch_h,
+                fill=colour, outline=self._outline, width=1)
+            self._item_colour[item] = colour
+            self._items.append(item)
+            self._colour_items.setdefault(colour, []).append(item)
+            self.canvas.tag_bind(item, "<Button-1>", lambda event, i=item: self._clicked(i))
+            self.canvas.tag_bind(item, "<Enter>",
+                                 lambda event: self.canvas.configure(cursor="hand2"))
+            self.canvas.tag_bind(item, "<Leave>",
+                                 lambda event: self.canvas.configure(cursor=""))
+        self.set_selected(self.selected_colour)
+
+    # -- interaction ---------------------------------------------------
+    def _item_at(self, x: float, y: float) -> Optional[int]:
+        column = int(x // (self._swatch_w + self._gap))
+        row = int(y // (self._swatch_h + self._gap))
+        if column < 0 or column >= self.columns or row < 0:
+            return None
+        if x - column * (self._swatch_w + self._gap) > self._swatch_w:
+            return None
+        if y - row * (self._swatch_h + self._gap) > self._swatch_h:
+            return None
+        index = row * self.columns + column
+        if index < 0 or index >= len(self._items):
+            return None
+        return self._items[index]
+
+    def _motion(self, event):
+        item = self._item_at(getattr(event, "x", 0), getattr(event, "y", 0))
+        if item == self._hover_item:
+            return
+        self._unhover()
+        self._hover_item = item
+        if item is not None and item != self._selected_item:
+            try:
+                self.canvas.itemconfigure(item, outline=self._hover, width=2)
+            except tk.TclError:
+                pass
+
+    def _leave(self, event=None):
+        self._unhover()
+        try:
+            self.canvas.configure(cursor="")
+        except tk.TclError:
+            pass
+
+    def _unhover(self):
+        item, self._hover_item = self._hover_item, None
+        if item is None or item == self._selected_item:
+            return
+        try:
+            self.canvas.itemconfigure(item, outline=self._outline, width=1)
+        except tk.TclError:
+            pass
+
+    def _clicked(self, item: int):
+        colour = self._item_colour.get(item)
+        if colour is None:
+            return
+        self.selected_colour = colour
+        self._highlight_item(item)
+        if self._on_pick is not None:
+            self._on_pick(colour)
+
+    def _highlight_item(self, item: Optional[int]):
+        if self._selected_item is not None:
+            try:
+                self.canvas.itemconfigure(self._selected_item,
+                                          outline=self._outline, width=1)
+            except tk.TclError:
+                pass
+        self._selected_item = item
+        if item is not None:
+            try:
+                self.canvas.itemconfigure(item, outline=self._highlight, width=2)
+                self.canvas.tag_raise(item)
+            except tk.TclError:
+                pass
+
+    def set_selected(self, colour: Optional[str]):
+        """Outline the swatch holding ``colour`` (no callback fired)."""
+        normalised = normalise_hex_colour(colour) if colour else None
+        self.selected_colour = normalised
+        items = self._colour_items.get(normalised or "", [])
+        self._highlight_item(items[0] if items else None)
+
+
+class ColourGradientPicker(_TkFrame):
+    """Microsoft Paint's "Define Custom Colors" field.
+
+    A hue (left to right) × saturation (top to bottom) gradient square with a
+    brightness bar down its right-hand side: every hue is reachable at every
+    tint, tone and shade, which is what gives the studio the full colour
+    range rather than a fixed set of discrete swatches.
+    """
+
+    def __init__(self, master, *, on_pick=None, cell_size: int = GRADIENT_CELL,
+                 columns: int = GRADIENT_COLUMNS, rows: int = GRADIENT_ROWS,
+                 brightness_steps: int = BRIGHTNESS_STEPS,
+                 bar_width: int = 24, gap: int = 8,
+                 background: str = "#FFFFFF", outline: str = "#8C96A8",
+                 highlight: str = "#111827", **kwargs):
+        super().__init__(master, bg=background, **kwargs)
+        self._on_pick = on_pick
+        self.columns = max(2, columns)
+        self.rows = max(2, rows)
+        self.cell_size = max(2, cell_size)
+        self.brightness_steps = max(3, brightness_steps)
+        self._outline = outline
+        self._highlight = highlight
+        self._bar_width = max(8, bar_width)
+        self._gap = max(2, gap)
+
+        self.hue = 0.58
+        self.saturation = 0.85
+        self.value = 0.9
+        self.selected_colour: Optional[str] = None
+
+        self.field_width = self.columns * self.cell_size
+        self.field_height = self.rows * self.cell_size
+        self._bar_origin = self.field_width + self._gap
+        self._field_items: Dict[int, Tuple[float, float]] = {}
+        self._bar_items: Dict[int, float] = {}
+        self._marker_items: List[int] = []
+        self._bar_marker: Optional[int] = None
+        self._redraw_pending = False
+
+        self.canvas = tk.Canvas(self, width=self.field_width + self._gap + self._bar_width,
+                                height=self.field_height, bg=background,
+                                highlightthickness=0, bd=0)
+        self.canvas.pack()
+        self._draw_brightness_bar()
+        self._draw_field()
+        self._draw_markers()
+        self.canvas.bind("<Button-1>", self._pressed)
+        self.canvas.bind("<B1-Motion>", self._dragged)
+        self.canvas.bind("<ButtonRelease-1>", self._released)
+        self.canvas.bind("<Leave>", lambda event: self.canvas.configure(cursor=""))
+
+    # -- drawing -------------------------------------------------------
+    def _draw_field(self):
+        """(Re)paint the hue × saturation square at the current brightness."""
+        try:
+            for item in self._field_items:
+                self.canvas.delete(item)
+        except tk.TclError:
+            pass
+        self._field_items = {}
+        cell = self.cell_size
+        hue_steps = max(1, self.columns - 1)
+        sat_steps = max(1, self.rows - 1)
+        for row in range(self.rows):
+            saturation = row / sat_steps
+            for column in range(self.columns):
+                hue = column / hue_steps
+                x0 = column * cell
+                y0 = row * cell
+                item = self.canvas.create_rectangle(
+                    x0, y0, x0 + cell, y0 + cell,
+                    fill=hsv_to_hex(hue, saturation, self.value), outline="", width=0)
+                self._field_items[item] = (hue, saturation)
+        if self._field_items:
+            self._place_field_marker(raise_it=True)
+
+    def _draw_brightness_bar(self):
+        step = self.field_height / self.brightness_steps
+        for index in range(self.brightness_steps):
+            value = 1.0 - index / (self.brightness_steps - 1)
+            item = self.canvas.create_rectangle(
+                self._bar_origin, index * step,
+                self._bar_origin + self._bar_width, (index + 1) * step,
+                fill=hsv_to_hex(self.hue, self.saturation, value),
+                outline=self._outline, width=1)
+            self._bar_items[item] = value
+        self._bar_marker = self.canvas.create_rectangle(
+            self._bar_origin - 2, 0, self._bar_origin + self._bar_width + 2, 3,
+            outline=self._highlight, width=2)
+
+    def _refresh_brightness_bar(self):
+        for item, value in self._bar_items.items():
+            try:
+                self.canvas.itemconfigure(item, fill=hsv_to_hex(self.hue, self.saturation, value))
+            except tk.TclError:
+                pass
+
+    def _draw_markers(self):
+        self._marker_items = [
+            self.canvas.create_oval(0, 0, 0, 0, outline="#FFFFFF", width=2),
+            self.canvas.create_oval(0, 0, 0, 0, outline=self._highlight, width=1),
+        ]
+        self._place_field_marker()
+        self._place_bar_marker()
+
+    def _field_marker_centre(self) -> Tuple[float, float]:
+        columns = max(1, self.columns - 1)
+        rows = max(1, self.rows - 1)
+        cx = min(self.columns - 1, self.hue * columns) * self.cell_size + self.cell_size / 2.0
+        cy = min(self.rows - 1, self.saturation * rows) * self.cell_size + self.cell_size / 2.0
+        return cx, cy
+
+    def _place_field_marker(self, raise_it: bool = False):
+        if len(self._marker_items) != 2:
+            return
+        cx, cy = self._field_marker_centre()
+        radius = max(4.0, self.cell_size * 0.8)
+        try:
+            self.canvas.coords(self._marker_items[0], cx - radius, cy - radius,
+                               cx + radius, cy + radius)
+            self.canvas.coords(self._marker_items[1], cx - radius + 2, cy - radius + 2,
+                               cx + radius - 2, cy + radius - 2)
+            if raise_it:
+                for item in self._marker_items:
+                    self.canvas.tag_raise(item)
+        except tk.TclError:
+            pass
+
+    def _place_bar_marker(self):
+        if self._bar_marker is None:
+            return
+        y = (1.0 - self.value) * self.field_height
+        try:
+            self.canvas.coords(self._bar_marker,
+                               self._bar_origin - 2, y - 1.5,
+                               self._bar_origin + self._bar_width + 2, y + 1.5)
+            self.canvas.tag_raise(self._bar_marker)
+        except tk.TclError:
+            pass
+
+    # -- selection -----------------------------------------------------
+    def current_colour(self) -> str:
+        return hsv_to_hex(self.hue, self.saturation, self.value)
+
+    def set_selected(self, colour: Optional[str]):
+        """Move the crosshair onto ``colour`` (no callback fired)."""
+        hsv = hsv_from_hex(colour) if colour else None
+        self.selected_colour = normalise_hex_colour(colour) if colour else None
+        if hsv is None:
+            return
+        self.hue, self.saturation, self.value = hsv
+        self._draw_field()
+        self._refresh_brightness_bar()
+        self._place_bar_marker()
+
+    def _schedule_redraw(self):
+        """Coalesce brightness redraws so dragging stays smooth."""
+        if self._redraw_pending:
+            return
+        self._redraw_pending = True
+        try:
+            self.after(25, self._flush_redraw)
+        except tk.TclError:
+            self._flush_redraw()
+
+    def _flush_redraw(self):
+        self._redraw_pending = False
+        try:
+            if not self.canvas.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        self._draw_field()
+        self._refresh_brightness_bar()
+        self._place_bar_marker()
+
+    # -- interaction ---------------------------------------------------
+    def _pressed(self, event):
+        self._apply_pointer(getattr(event, "x", 0), getattr(event, "y", 0))
+
+    def _dragged(self, event):
+        self._apply_pointer(getattr(event, "x", 0), getattr(event, "y", 0))
+
+    def _released(self, event=None):
+        self._flush_redraw()
+
+    def _apply_pointer(self, x: float, y: float):
+        if x >= self._bar_origin:
+            self.value = max(0.0, min(1.0, 1.0 - y / max(1.0, self.field_height)))
+            self._schedule_redraw()
+        else:
+            self.hue = max(0.0, min(1.0, x / max(1.0, self.field_width)))
+            self.saturation = max(0.0, min(1.0, y / max(1.0, self.field_height)))
+            self._place_field_marker()
+        self._emit()
+
+    def _emit(self):
+        colour = self.current_colour()
+        self.selected_colour = colour
+        if self._on_pick is not None:
+            self._on_pick(colour)
+
+
+class PaletteBinder:
+    """Keeps a group of widgets painted in the palette currently in force.
+
+    Every widget registers once with a *role*: the set of palette colours it
+    should follow (a heading, a text field, a card...). Switching palette then
+    repaints the whole window with one :meth:`apply` call instead of dozens of
+    hand-written ``configure`` calls scattered through the UI code.
+    """
+
+    ROLES = ("background", "body", "heading", "muted", "card", "field",
+             "accent", "primary_button", "button", "selectable", "scale", "swatch")
+
+    def __init__(self, colours: Optional[Dict[str, str]] = None):
+        self._colours: Dict[str, str] = dict(colours) if colours else {}
+        self._slots: List[Tuple[object, object, str, Dict[str, object]]] = []
+
+    # -- registration --------------------------------------------------
+    def register(self, widget, role: str = "body", window=None, **extra):
+        """Track ``widget`` and paint it straight away when possible."""
+        self._slots.append((window, widget, role, dict(extra)))
+        if self._colours:
+            self._paint(widget, role, extra)
+        return widget
+
+    def register_all(self, widgets, role: str = "body", window=None, **extra):
+        for widget in widgets:
+            self.register(widget, role, window=window, **extra)
+
+    def apply(self, colours: Optional[Dict[str, str]] = None):
+        """Repaint every registered widget for ``colours``."""
+        if colours:
+            self._colours = dict(colours)
+        if not self._colours:
+            return
+        for _, widget, role, extra in list(self._slots):
+            self._paint(widget, role, extra)
+
+    def forget(self, window) -> int:
+        """Drop the widgets of a closed window (avoids touching dead ones)."""
+        before = len(self._slots)
+        self._slots = [slot for slot in self._slots if slot[0] != window]
+        return before - len(self._slots)
+
+    def count(self) -> int:
+        return len(self._slots)
+
+    # -- painting ------------------------------------------------------
+    def _options(self, role: str, extra: Dict[str, object]) -> Dict[str, object]:
+        c = self._colours
+        table = {
+            "background": {"bg": c["background"]},
+            "body": {"bg": c["background"], "fg": c["foreground"]},
+            "heading": {"bg": c["background"], "fg": c["primary"]},
+            "muted": {"bg": c["background"], "fg": c["muted"]},
+            "card": {"bg": c["background"], "highlightbackground": c["surface"],
+                     "highlightcolor": c["surface"]},
+            "field": {"bg": c["surface"], "fg": c["foreground"],
+                      "insertbackground": c["foreground"],
+                      "highlightbackground": c["muted"],
+                      "highlightcolor": c["accent"],
+                      "selectbackground": c["accent"],
+                      "selectforeground": c["accent_foreground"]},
+            "accent": {"bg": c["accent"], "fg": c["accent_foreground"],
+                       "activebackground": c["primary"],
+                       "activeforeground": c["button_foreground"]},
+            "primary_button": {"bg": c["primary"], "fg": c["button_foreground"],
+                               "activebackground": c["accent"],
+                               "activeforeground": c["accent_foreground"]},
+            "button": {"bg": c["surface"], "fg": c["foreground"],
+                       "activebackground": c["muted"],
+                       "activeforeground": c["foreground"]},
+            "selectable": {"bg": c["background"], "fg": c["foreground"],
+                           "activebackground": c["background"],
+                           "activeforeground": c["foreground"],
+                           "selectcolor": c["surface"]},
+            "scale": {"bg": c["background"], "fg": c["foreground"],
+                      "troughcolor": c["surface"],
+                      "activebackground": c["accent"],
+                      "highlightbackground": c["background"]},
+            "swatch": {"bg": c["surface"], "highlightbackground": c["foreground"]},
+        }
+        options = dict(table.get(role, table["body"]))
+        options.update(extra)
+        return options
+
+    def _paint(self, widget, role: str, extra: Dict[str, object]):
+        try:
+            widget.configure(**self._options(role, extra))
+        except tk.TclError:
+            # ttk widgets reject bg/fg; they are styled through ttk.Style.
+            pass
+        except (AttributeError, TypeError):
+            pass
+
+
 class CustomPaletteEditor(_TkToplevel):
     """Dialog that builds and saves a user-defined palette.
 
-    Three colour roles (primary, accent, background) are filled in from the
-    hexagon picker or typed as hex, previewed live, named, and then handed
-    back to the app through ``on_save``.
+    Three colour roles (primary, accent, background) are filled in from any of
+    three pickers — the Paint-style hue/saturation gradient field with its
+    brightness bar, the 48-swatch "basic colours" board, or the hexagon
+    honeycomb — then previewed live, named, and handed back to the app through
+    ``on_save``.
     """
 
     def __init__(self, master, colours: Dict[str, str], *, on_save,
@@ -2509,15 +3154,17 @@ class CustomPaletteEditor(_TkToplevel):
         super().__init__(master)
         self._on_save = on_save
         self._editing = editing
-        c = colours
+        self._initial_name = initial_name
+        c = self.colours = dict(colours)
         base = initial or ("#1E3A8A", "#3B82F6", "#F8FAFC")
         self._values = {
             "primary": normalise_hex_colour(base[0]) or "#1E3A8A",
             "accent": normalise_hex_colour(base[1]) or "#3B82F6",
             "background": normalise_hex_colour(base[2]) or "#F8FAFC",
         }
+        self._binder = PaletteBinder(c)
 
-        self.title("Custom UI Colour — colour hexagon")
+        self.title("Custom UI Colour — colour studio")
         self.configure(background=c["background"])
         self.resizable(False, False)
         try:
@@ -2532,28 +3179,126 @@ class CustomPaletteEditor(_TkToplevel):
 
         body = tk.Frame(self, bg=c["background"], padx=18, pady=16)
         body.pack(fill="both", expand=True)
-        tk.Label(body, text="Custom UI Colour", bg=c["background"], fg=c["primary"],
-                 font=("Segoe UI", 16, "bold")).pack(anchor="w")
-        tk.Label(body,
-                 text="Pick a hexagon for each role, name the set, then save it with the other palettes.",
-                 bg=c["background"], fg=c["muted"], font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 12))
+        self._binder.register(body, "background", window=self)
+        self._title = tk.Label(body, text="Custom UI Colour", bg=c["background"],
+                               fg=c["primary"], font=("Segoe UI", 16, "bold"))
+        self._title.pack(anchor="w")
+        self._binder.register(self._title, "heading", window=self)
+        self._subtitle = tk.Label(
+            body,
+            text="Pick any colour from the gradient, the swatch board or the hexagon — "
+                 "then choose which role it fills.",
+            bg=c["background"], fg=c["muted"], font=("Segoe UI", 9))
+        self._subtitle.pack(anchor="w", pady=(2, 12))
+        self._binder.register(self._subtitle, "muted", window=self)
 
         main = tk.Frame(body, bg=c["background"])
         main.pack(fill="both", expand=True)
+        self._binder.register(main, "background", window=self)
 
-        left = tk.Frame(main, bg=c["background"])
+        self._build_picker_column(main)
+        self._build_role_column(main)
+
+        buttons = tk.Frame(body, bg=c["background"])
+        buttons.pack(fill="x", pady=(16, 0))
+        self._binder.register(buttons, "background", window=self)
+        cancel = tk.Button(buttons, text="Cancel", command=self.destroy, relief="flat",
+                           bg=c["surface"], fg=c["foreground"], activebackground=c["muted"],
+                           padx=14, pady=5, font=("Segoe UI", 9))
+        cancel.pack(side="right")
+        self._binder.register(cancel, "button", window=self)
+        save = tk.Button(buttons, text="Save colours", command=self._save, relief="flat",
+                         padx=16, pady=5, font=("Segoe UI", 9, "bold"))
+        save.pack(side="right", padx=(0, 8))
+        self._binder.register(save, "accent", window=self)
+
+        self._role_changed()
+        self._refresh_preview()
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+    # ------------------------------------------------------------------
+    # Construction
+    # ------------------------------------------------------------------
+    def _build_picker_column(self, parent):
+        c = self.colours
+        left = tk.Frame(parent, bg=c["background"])
         left.pack(side="left", anchor="n")
-        self.picker = ColourHexagonPicker(left, on_pick=self._picked,
-                                          background=c["surface"],
-                                          outline=c["muted"], highlight=c["foreground"],
-                                          highlightthickness=1,
-                                          highlightbackground=c["muted"])
-        self.picker.pack(anchor="n")
+        self._binder.register(left, "background", window=self)
+
+        self._style_notebook()
+        self.notebook = ttk.Notebook(left, style="Studio.TNotebook")
+        self.notebook.pack(anchor="n")
+        self._binder.register(self.notebook, "background", window=self)
+
+        gradient_tab = tk.Frame(self.notebook, bg=c["background"])
+        self._binder.register(gradient_tab, "background", window=self)
+        self.gradient = ColourGradientPicker(
+            gradient_tab, on_pick=lambda colour: self._picked(colour, "gradient"),
+            background=c["surface"],
+            outline=c["muted"], highlight=c["foreground"])
+        self.gradient.pack(padx=12, pady=(12, 4))
+        hint = tk.Label(gradient_tab,
+                        text="Hue across, saturation down · use the bar for brightness",
+                        bg=c["background"], fg=c["muted"], font=("Segoe UI", 8))
+        hint.pack(pady=(0, 10))
+        self._binder.register(hint, "muted", window=self)
+
+        swatch_tab = tk.Frame(self.notebook, bg=c["background"])
+        self._binder.register(swatch_tab, "background", window=self)
+        self.swatches = ColourSwatchBoard(
+            swatch_tab, on_pick=lambda colour: self._picked(colour, "swatches"),
+            background=c["surface"],
+            outline=c["muted"], highlight=c["foreground"], hover=c["foreground"])
+        self.swatches.pack(padx=12, pady=(16, 6))
+        hint = tk.Label(swatch_tab,
+                        text="48 basic colours · tints and shades of every hue",
+                        bg=c["background"], fg=c["muted"], font=("Segoe UI", 8))
+        hint.pack(pady=(0, 12))
+        self._binder.register(hint, "muted", window=self)
+
+        hexagon_tab = tk.Frame(self.notebook, bg=c["background"])
+        self._binder.register(hexagon_tab, "background", window=self)
+        self.picker = ColourHexagonPicker(
+            hexagon_tab, on_pick=lambda colour: self._picked(colour, "hexagon"),
+            background=c["surface"],
+            outline=c["muted"], highlight=c["foreground"], highlightthickness=1,
+            highlightbackground=c["muted"])
+        self.picker.pack(padx=12, pady=(12, 4))
+        hint = tk.Label(hexagon_tab,
+                        text="Honeycomb of discrete shades · black-to-white strip below",
+                        bg=c["background"], fg=c["muted"], font=("Segoe UI", 8))
+        hint.pack(pady=(0, 10))
+        self._binder.register(hint, "muted", window=self)
+
+        self.notebook.add(gradient_tab, text="Gradient")
+        self.notebook.add(swatch_tab, text="Swatches")
+        self.notebook.add(hexagon_tab, text="Hexagon")
+        try:
+            self.notebook.select(gradient_tab)
+        except tk.TclError:
+            pass
+
+        shades_head = tk.Label(left, text="Tints & shades", bg=c["background"],
+                               fg=c["primary"], font=("Segoe UI", 9, "bold"))
+        shades_head.pack(anchor="w", pady=(12, 0))
+        self._binder.register(shades_head, "heading", window=self)
+        shades_hint = tk.Label(left, text="Click a shade to apply it to the selected role.",
+                               bg=c["background"], fg=c["muted"], font=("Segoe UI", 8))
+        shades_hint.pack(anchor="w", pady=(0, 4))
+        self._binder.register(shades_hint, "muted", window=self)
+        self.shades = ColourShadeStrip(left, on_pick=self._shade_picked,
+                                       background=c["surface"], outline=c["muted"],
+                                       highlight=c["foreground"])
+        self.shades.pack(anchor="w")
+        self._binder.register(self.shades, "background", window=self)
 
         hex_row = tk.Frame(left, bg=c["background"])
-        hex_row.pack(fill="x", pady=(10, 0))
-        tk.Label(hex_row, text="Hex", bg=c["background"], fg=c["foreground"],
-                 font=("Segoe UI", 9, "bold")).pack(side="left")
+        hex_row.pack(fill="x", pady=(12, 0))
+        self._binder.register(hex_row, "background", window=self)
+        hex_label = tk.Label(hex_row, text="Hex", bg=c["background"], fg=c["foreground"],
+                             font=("Segoe UI", 9, "bold"))
+        hex_label.pack(side="left")
+        self._binder.register(hex_label, "body", window=self)
         self.hex_var = tk.StringVar()
         self.hex_entry = tk.Entry(hex_row, textvariable=self.hex_var, width=10,
                                   bg=c["surface"], fg=c["foreground"],
@@ -2561,81 +3306,133 @@ class CustomPaletteEditor(_TkToplevel):
                                   highlightthickness=1, highlightbackground=c["muted"],
                                   font=("Consolas", 10))
         self.hex_entry.pack(side="left", padx=(8, 8))
+        self._binder.register(self.hex_entry, "field", window=self)
         self.hex_entry.bind("<Return>", lambda event: self._apply_typed_hex())
-        tk.Button(hex_row, text="Use hex", command=self._apply_typed_hex, relief="flat",
-                  bg=c["primary"], fg=c["button_foreground"],
-                  activebackground=c["accent"], activeforeground=c["accent_foreground"],
-                  padx=10, pady=2, font=("Segoe UI", 9, "bold")).pack(side="left")
+        use_hex = tk.Button(hex_row, text="Use hex", command=self._apply_typed_hex,
+                            relief="flat", bg=c["primary"], fg=c["button_foreground"],
+                            activebackground=c["accent"],
+                            activeforeground=c["accent_foreground"],
+                            padx=10, pady=2, font=("Segoe UI", 9, "bold"))
+        use_hex.pack(side="left")
+        self._binder.register(use_hex, "primary_button", window=self)
         self._hex_hint = tk.Label(hex_row, text="", bg=c["background"], fg=c["muted"],
                                   font=("Segoe UI", 8))
         self._hex_hint.pack(side="left", padx=(8, 0))
+        self._binder.register(self._hex_hint, "muted", window=self)
 
-        right = tk.Frame(main, bg=c["background"])
+        self.rgb_label = tk.Label(left, text="", bg=c["background"], fg=c["muted"],
+                                  font=("Consolas", 8))
+        self.rgb_label.pack(anchor="w", pady=(4, 0))
+        self._binder.register(self.rgb_label, "muted", window=self)
+
+    def _build_role_column(self, parent):
+        c = self.colours
+        right = tk.Frame(parent, bg=c["background"])
         right.pack(side="left", anchor="n", padx=(20, 0), fill="both", expand=True)
+        self._binder.register(right, "background", window=self)
 
-        tk.Label(right, text="Colour being edited", bg=c["background"], fg=c["primary"],
-                 font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        heading = tk.Label(right, text="Colour being edited", bg=c["background"],
+                           fg=c["primary"], font=("Segoe UI", 10, "bold"))
+        heading.pack(anchor="w")
+        self._binder.register(heading, "heading", window=self)
+
         self.role_var = tk.StringVar(value="primary")
-        self._role_swatches = {}
-        self._role_labels = {}
-        for role, caption in (("primary", "Primary (headings, buttons)"),
-                              ("accent", "Accent (highlights, progress)"),
-                              ("background", "Background (window + panels)")):
+        self._role_swatches: Dict[str, tk.Frame] = {}
+        self._role_labels: Dict[str, tk.Label] = {}
+        for role, caption in (("primary", "Primary — headings, buttons"),
+                              ("accent", "Accent — highlights, progress"),
+                              ("background", "Background — window + panels")):
             row = tk.Frame(right, bg=c["background"])
             row.pack(fill="x", pady=3)
+            self._binder.register(row, "background", window=self)
             radio = tk.Radiobutton(row, text=caption, value=role, variable=self.role_var,
-                                   command=self._role_changed, bg=c["background"],
-                                   fg=c["foreground"], activebackground=c["background"],
-                                   activeforeground=c["foreground"], selectcolor=c["surface"],
-                                   anchor="w", font=("Segoe UI", 9))
+                                   command=self._role_changed, anchor="w",
+                                   font=("Segoe UI", 9))
             radio.pack(side="left", anchor="w")
+            self._binder.register(radio, "selectable", window=self)
             swatch = tk.Frame(row, width=34, height=18, bg=self._values[role],
-                              highlightthickness=1, highlightbackground=c["foreground"])
+                              highlightthickness=1,
+                              highlightbackground=c["foreground"])
             swatch.pack(side="right")
-            label = tk.Label(row, text=self._values[role], bg=c["background"], fg=c["muted"],
-                             font=("Consolas", 9))
+            self._binder.register(swatch, "swatch", window=self, bg=self._values[role])
+            label = tk.Label(row, text=self._values[role], bg=c["background"],
+                             fg=c["muted"], font=("Consolas", 9))
             label.pack(side="right", padx=(0, 8))
+            self._binder.register(label, "muted", window=self)
             self._role_swatches[role] = swatch
             self._role_labels[role] = label
 
-        tk.Label(right, text="Preview", bg=c["background"], fg=c["primary"],
-                 font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(14, 4))
-        self._preview = tk.Frame(right, height=96, highlightthickness=1,
+        preview_heading = tk.Label(right, text="Live preview", bg=c["background"],
+                                   fg=c["primary"], font=("Segoe UI", 10, "bold"))
+        preview_heading.pack(anchor="w", pady=(14, 4))
+        self._binder.register(preview_heading, "heading", window=self)
+        self._preview = tk.Frame(right, height=120, highlightthickness=1,
                                  highlightbackground=c["muted"])
         self._preview.pack(fill="x")
         self._preview.pack_propagate(False)
-        self._preview_title = tk.Label(self._preview, text="AutoTyper", font=("Segoe UI", 12, "bold"))
+        self._preview_title = tk.Label(self._preview, text="AutoTyper",
+                                       font=("Segoe UI", 12, "bold"))
         self._preview_title.pack(anchor="w", padx=10, pady=(12, 0))
         self._preview_body = tk.Label(self._preview, text="Your colours, applied live.",
                                       font=("Segoe UI", 9))
         self._preview_body.pack(anchor="w", padx=10)
-        self._preview_button = tk.Label(self._preview, text="  Accent button  ", font=("Segoe UI", 9, "bold"))
-        self._preview_button.pack(anchor="w", padx=10, pady=(8, 0))
+        self._preview_button = tk.Label(self._preview, text="  Accent button  ",
+                                        font=("Segoe UI", 9, "bold"))
+        self._preview_button.pack(anchor="w", padx=10, pady=(10, 0))
 
-        tk.Label(right, text="Palette name", bg=c["background"], fg=c["primary"],
-                 font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(14, 4))
-        self.name_var = tk.StringVar(value=initial_name or "My Colours")
-        tk.Entry(right, textvariable=self.name_var, bg=c["surface"], fg=c["foreground"],
-                 insertbackground=c["foreground"], relief="flat", highlightthickness=1,
-                 highlightbackground=c["muted"], font=("Segoe UI", 10)).pack(fill="x")
+        name_heading = tk.Label(right, text="Palette name", bg=c["background"],
+                                fg=c["primary"], font=("Segoe UI", 10, "bold"))
+        name_heading.pack(anchor="w", pady=(14, 4))
+        self._binder.register(name_heading, "heading", window=self)
+        self.name_var = tk.StringVar(value=self._initial_name or "My Colours")
+        name_entry = tk.Entry(right, textvariable=self.name_var, bg=c["surface"],
+                              fg=c["foreground"], insertbackground=c["foreground"],
+                              relief="flat", highlightthickness=1,
+                              highlightbackground=c["muted"], font=("Segoe UI", 10))
+        name_entry.pack(fill="x")
+        self._binder.register(name_entry, "field", window=self)
 
-        buttons = tk.Frame(body, bg=c["background"])
-        buttons.pack(fill="x", pady=(16, 0))
-        tk.Button(buttons, text="Cancel", command=self.destroy, relief="flat",
-                  bg=c["surface"], fg=c["foreground"], activebackground=c["muted"],
-                  padx=14, pady=5, font=("Segoe UI", 9)).pack(side="right")
-        tk.Button(buttons, text="Save colours", command=self._save, relief="flat",
-                  bg=c["accent"], fg=c["accent_foreground"],
-                  activebackground=c["primary"], activeforeground=c["button_foreground"],
-                  padx=16, pady=5, font=("Segoe UI", 9, "bold")).pack(side="right", padx=(0, 8))
+    def _style_notebook(self):
+        c = self.colours
+        try:
+            style = ttk.Style(self)
+            style.configure("Studio.TNotebook", background=c["background"],
+                            borderwidth=0, tabmargins=(0, 0, 0, 0))
+            style.configure("Studio.TNotebook.Tab", padding=(14, 6),
+                            font=("Segoe UI", 9, "bold"), background=c["surface"],
+                            foreground=c["foreground"])
+            style.map("Studio.TNotebook.Tab",
+                      background=[("selected", c["accent"])],
+                      foreground=[("selected", c["accent_foreground"])])
+        except tk.TclError:
+            pass
 
-        self._role_changed()
+    # ------------------------------------------------------------------
+    # Palette changes
+    # ------------------------------------------------------------------
+    def apply_palette(self, colours: Dict[str, str]):
+        """Repaint the dialog when the app palette changes underneath it."""
+        self.colours = dict(colours)
+        self.configure(background=colours["background"])
+        self._binder.apply(colours)
+        self._style_notebook()
+        for canvas in (self.gradient.canvas, self.swatches.canvas,
+                       self.shades.canvas, self.picker.canvas):
+            try:
+                canvas.configure(bg=colours["surface"])
+            except tk.TclError:
+                pass
         self._refresh_preview()
-        self.protocol("WM_DELETE_WINDOW", self.destroy)
 
-    # -- internals -----------------------------------------------------
-    def _picked(self, colour: str):
-        self._set_role_colour(self.role_var.get(), colour)
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+    def _picked(self, colour: str, source: str = "external"):
+        """A colour came from one of the three pickers."""
+        self._set_role_colour(self.role_var.get(), colour, source=source)
+
+    def _shade_picked(self, colour: str):
+        self._set_role_colour(self.role_var.get(), colour, source="shades")
 
     def _apply_typed_hex(self):
         colour = normalise_hex_colour(self.hex_var.get())
@@ -2643,28 +3440,42 @@ class CustomPaletteEditor(_TkToplevel):
             self._hex_hint.configure(text="use #RRGGBB")
             return
         self._hex_hint.configure(text="")
-        self._set_role_colour(self.role_var.get(), colour)
-        self.picker.set_selected(colour)
+        self._set_role_colour(self.role_var.get(), colour, source="hex")
 
-    def _set_role_colour(self, role: str, colour: str):
+    def _set_role_colour(self, role: str, colour: str, source: str = "picker"):
         colour = normalise_hex_colour(colour) or self._values[role]
         self._values[role] = colour
         self.hex_var.set(colour)
         self._role_swatches[role].configure(bg=colour)
         self._role_labels[role].configure(text=colour)
+        self.rgb_label.configure(text=format_rgb(colour))
+        if source != "shades":
+            self.shades.set_base_colour(colour)
+        self._sync_pickers(colour, source)
         self._refresh_preview()
+
+    def _sync_pickers(self, colour: str, source: str):
+        """Keep the other two pickers pointing at the colour just chosen."""
+        if source != "gradient":
+            self.gradient.set_selected(colour)
+        if source != "swatches":
+            self.swatches.set_selected(colour)
+        if source != "hexagon":
+            self.picker.set_selected(colour)
+        if source != "shades":
+            self.shades.set_selected(colour)
 
     def _role_changed(self):
         colour = self._values[self.role_var.get()]
-        self.hex_var.set(colour)
-        self.picker.set_selected(colour)
+        self._set_role_colour(self.role_var.get(), colour, source="role")
 
     def _refresh_preview(self):
         preview = _palette_colours("__preview__", {"__preview__": self.triple()})
         self._preview.configure(bg=preview["background"])
         self._preview_title.configure(bg=preview["background"], fg=preview["primary"])
         self._preview_body.configure(bg=preview["background"], fg=preview["foreground"])
-        self._preview_button.configure(bg=preview["accent"], fg=preview["accent_foreground"])
+        self._preview_button.configure(bg=preview["accent"],
+                                       fg=preview["accent_foreground"])
 
     def triple(self) -> Tuple[str, str, str]:
         return (self._values["primary"], self._values["accent"], self._values["background"])
@@ -2679,6 +3490,670 @@ class CustomPaletteEditor(_TkToplevel):
         self.destroy()
 
 
+# =============================================================================
+# 11c. IN-APP GUIDE — WHAT EVERY CONTROL DOES
+# =============================================================================
+#
+# The guide is plain data (so it can be unit tested and proof-read without a
+# display) rendered by the small window at the bottom of this block. Every
+# control of the main window, the settings window and the colour studio has an
+# entry here; ``test_guide_ui.py`` fails if one is ever added without being
+# documented.
+
+
+@dataclass(frozen=True)
+class GuideItem:
+    """One documented control: its label and what it does."""
+
+    name: str
+    text: str
+
+
+@dataclass(frozen=True)
+class GuideSection:
+    """A titled group of :class:`GuideItem` entries."""
+
+    title: str
+    blurb: str
+    items: Tuple[GuideItem, ...]
+
+
+WHEEL_SEQUENCES = ("<MouseWheel>", "<Button-4>", "<Button-5>")
+
+
+def bind_wheel_scrolling(canvas, sequences=WHEEL_SEQUENCES) -> Tuple[str, ...]:
+    """Scroll ``canvas`` with the mouse wheel on Windows, macOS and X11.
+
+    Tk delivers wheel events to the widget under the pointer, which is usually
+    a child of the canvas being scrolled, so the binding is global. The
+    sequences that were bound are returned so the window can release them when
+    it closes (see :func:`release_wheel_scrolling`).
+    """
+    def on_wheel(event):
+        try:
+            if getattr(event, "num", None) == 4:
+                delta = -1
+            elif getattr(event, "num", None) == 5:
+                delta = 1
+            else:
+                delta = -1 if getattr(event, "delta", 0) > 0 else 1
+            canvas.yview_scroll(delta, "units")
+        except tk.TclError:
+            pass
+
+    bound = []
+    for sequence in sequences:
+        try:
+            canvas.bind_all(sequence, on_wheel, add="+")
+            bound.append(sequence)
+        except tk.TclError:
+            continue
+    return tuple(bound)
+
+
+def release_wheel_scrolling(widget, sequences) -> None:
+    """Undo :func:`bind_wheel_scrolling` for a window that is closing."""
+    for sequence in sequences or ():
+        try:
+            widget.unbind_all(sequence)
+        except tk.TclError:
+            pass
+
+
+def _guide_item(name: str, text: str) -> GuideItem:
+    return GuideItem(name, " ".join(text.split()))
+
+
+_GUIDE_ITEMS: Tuple[GuideSection, ...] = (
+    GuideSection(
+        "Start here", "Three steps are all it takes to watch AutoTyper type.",
+        (
+            _guide_item("1. Paste your text",
+                        "Paste or type the text you want reproduced into the large box, "
+                        "then set your speed. Pasting a block of Pascal shows Coding "
+                        "Mode at its best."),
+            _guide_item("2. Press Start AutoTyper",
+                        "AutoTyper plans the whole keystroke trace, then counts down so "
+                        "you can click the window you want the text typed into."),
+            _guide_item("3. Watch the countdown, then let go of the mouse",
+                        "Keystrokes are sent to whatever window has focus. Keep the "
+                        "target window in front until the status line says Completed."),
+        ),
+    ),
+    GuideSection(
+        "Header buttons", "The three controls in the top-right corner.",
+        (
+            _guide_item("❓ Guide",
+                        "Opens this window. It is also on F1, and AutoTyper opens it "
+                        "automatically the first time you start the app."),
+            _guide_item("⚙ Settings",
+                        "Appearance and window options: colour palettes, custom "
+                        "colours, always-on-top and the update controls."),
+            _guide_item("⬇ Get .exe",
+                        "Downloads the newest published AutoTyper.exe from GitHub so "
+                        "you can run AutoTyper without Python. Progress is shown on the "
+                        "bar above the Start button."),
+            _guide_item("⬇ Get vX .exe (update button)",
+                        "Only appears when a newer release exists. Nothing is ever "
+                        "downloaded or installed until you agree to it."),
+        ),
+    ),
+    GuideSection(
+        "Typing settings — speed & realism",
+        "How fast and how human the simulated typing is.",
+        (
+            _guide_item("Target speed (WPM)",
+                        "20 to 150 words per minute — the pace AutoTyper aims for on "
+                        "average. Each inter-key interval is drawn from a gamma "
+                        "distribution and modulated by Fitts' law, hand alternation, "
+                        "digraph speed-ups and syntax delays, so the trace breathes "
+                        "like a real typist. Use the box or drag the slider."),
+            _guide_item("Base typo rate (%)",
+                        "0.01 to 100 — the chance per keystroke of a natural error "
+                        "episode (finger-race transposition, neighbour-key brush, "
+                        "omission, insertion or overshoot). Every error is followed by "
+                        "an accelerating backspace correction, exactly as it is "
+                        "described in the trace statistics."),
+            _guide_item("Speed definition",
+                        "Net (incl. pauses & fixes) measures the speed you actually "
+                        "see: thinking pauses, error corrections and line resets all "
+                        "eat into it. Gross (keystroke rate) counts raw keystrokes "
+                        "only, so the same setting feels faster."),
+            _guide_item("Countdown (seconds)",
+                        "1 to 30 seconds of grace between pressing Start and the first "
+                        "keystroke, so you can focus your editor. AutoTyper shows the "
+                        "remaining seconds in the status line."),
+        ),
+    ),
+    GuideSection(
+        "Typing settings — editor behaviour",
+        "How AutoTyper copes with the editor it is typing into.",
+        (
+            _guide_item("Editor indentation",
+                        "Off types the text exactly as written. Copy previous line's "
+                        "indentation predicts and removes the whitespace a copied "
+                        "indent inserts. Smart is Pascal-aware: it predicts the extra "
+                        "level opened by begin, then, do, try, {, (, [ and clears it "
+                        "again. Fixed width backspaces a constant number of spaces "
+                        "after every newline."),
+            _guide_item("Fixed indent width",
+                        "How many spaces one indent level is worth. Only used by the "
+                        "Fixed width policy — the other policies detect the width from "
+                        "your text."),
+            _guide_item("Pascal coding mode (begin/end navigation)",
+                        "Types Pascal blocks the way a person does: it lays down "
+                        "begin … end first (lookahead finds the matching end, even "
+                        "through nested blocks, comments and strings), walks back up "
+                        "into the block with the arrow keys and fills the body lines in "
+                        "order. Leave it off for prose or other languages."),
+            _guide_item("Verify and repair target editor",
+                        "After the last keystroke AutoTyper reads the focused window "
+                        "back (select all, copy) and compares it with your text. If "
+                        "something is missing it types a repair pass. Turn it off for "
+                        "applications where select-all or copy would do something "
+                        "unexpected."),
+            _guide_item("Deterministic seed",
+                        "Ticks every run into a repeatable one: the same seed always "
+                        "produces the same timings, pauses and mistakes. Leave it off "
+                        "and each run is seeded from the operating system, so no two "
+                        "runs are identical."),
+            _guide_item("Seed value",
+                        "The 0 to 2147483647 number used when Deterministic seed is "
+                        "ticked. Share it with a trace export to reproduce a run "
+                        "exactly."),
+        ),
+    ),
+    GuideSection(
+        "Source text panel", "The big text box and the buttons above it.",
+        (
+            _guide_item("Text box",
+                        "The source that will be typed. Indentation and blank lines are "
+                        "preserved; long lines scroll sideways instead of wrapping, so "
+                        "what you see is what gets typed. Ctrl+A selects everything."),
+            _guide_item("Paste clipboard",
+                        "Replaces the contents of the box with your clipboard text — "
+                        "the quickest way to load a document or source file."),
+            _guide_item("Clear",
+                        "Empties the text box. It does not touch your clipboard."),
+            _guide_item("Benchmark",
+                        "Runs the whole simulation without pressing a single key and "
+                        "reports the result: achieved WPM, keystrokes, pauses, error "
+                        "episodes and percentiles. Use it to sanity-check a speed "
+                        "before letting AutoTyper loose on a real window."),
+            _guide_item("Character / line counter",
+                        "Next to the buttons: how much text is loaded and how many "
+                        "lines the trace will cover. The progress bar counts those "
+                        "lines while typing."),
+        ),
+    ),
+    GuideSection(
+        "Running a job", "The footer under the text box.",
+        (
+            _guide_item("Status line",
+                        "What the engine is doing right now: planning the trace, the "
+                        "countdown, which line is being typed, and the final result "
+                        "(Completed, Completed — verified, Stopped, Cancelled)."),
+            _guide_item("Progress bar",
+                        "Lines typed so far against the total number of lines in the "
+                        "trace."),
+            _guide_item("Start AutoTyper",
+                        "Plans the trace, counts down, then types. The window "
+                        "automatically greys this button out and enables Stop. "
+                        "Ctrl+Enter does the same thing."),
+            _guide_item("Stop",
+                        "Sets a stop flag: AutoTyper finishes the keystroke it is on "
+                        "and stops, keeping everything typed so far. Esc does the same, "
+                        "and the button only works while a job is running."),
+            _guide_item("What happens in order",
+                        "1) every line of your text is validated against the planner; "
+                        "2) the countdown runs; 3) keystrokes are sent with pynput to "
+                        "the focused window; 4) if verification is on, the result is "
+                        "read back and repaired if needed."),
+        ),
+    ),
+    GuideSection(
+        "Settings window", "Appearance & Window Settings, opened from ⚙.",
+        (
+            _guide_item("Colour palette cards",
+                        "Nineteen built-in palettes. Click anywhere on a card to apply "
+                        "it instantly; the three swatches show its primary, accent and "
+                        "background colour. Your choice is remembered between runs."),
+            _guide_item("🎨 New colours…",
+                        "Opens the colour studio to design your own palette from "
+                        "scratch."),
+            _guide_item("Edit selected / Delete selected",
+                        "Change or remove one of your saved palettes (they are marked "
+                        "with a ★). Double-clicking a ★ card is a shortcut for Edit. "
+                        "Built-in palettes cannot be edited or deleted."),
+            _guide_item("Keep AutoTyper above other applications",
+                        "Keeps this window on top, so it cannot hide behind the editor "
+                        "you are about to click. Untick it if AutoTyper covers something "
+                        "you need — the countdown still gives you time to switch "
+                        "windows."),
+            _guide_item("Check for updates now",
+                        "Asks GitHub for the newest release straight away. AutoTyper "
+                        "also performs this check silently, once, when the window "
+                        "opens."),
+            _guide_item("⬇ Download latest AutoTyper.exe",
+                        "Fetches the published executable into your downloads folder. "
+                        "In a packaged build it also offers to install itself and "
+                        "restart, keeping the old build as AutoTyper.exe.old."),
+            _guide_item("Live preview",
+                        "Shows the selected palette on a sample title, body text and "
+                        "accent button, so a dark theme can be checked for readability "
+                        "before you commit to it."),
+            _guide_item("Close",
+                        "Closes the settings window. There is no OK button: every "
+                        "option applies the moment you change it and is stored in "
+                        "~/.autotyper_settings.json."),
+        ),
+    ),
+    GuideSection(
+        "The colour studio", "The dialog behind 🎨 New colours….",
+        (
+            _guide_item("Tabs: Gradient / Swatches / Hexagon",
+                        "Three views of the same colour. Whichever one you click, the "
+                        "colour is applied to the role selected on the right."),
+            _guide_item("Gradient field (Paint style)",
+                        "The Microsoft-Paint “Define Custom Colors” square: hue runs "
+                        "across, saturation runs down, so every hue is available at "
+                        "every tint. Click or drag anywhere — the crosshair marks the "
+                        "current colour."),
+            _guide_item("Brightness bar",
+                        "The tall bar to the right of the square. Slide it to darken "
+                        "the whole square towards black or brighten it back up without "
+                        "losing the hue you picked."),
+            _guide_item("Tints & shades",
+                        "An eleven-step ramp of the colour being edited — pastel tints "
+                        "on the left, the pure colour in the middle, deep shades on the "
+                        "right, ending in black. One click applies a lighter or darker "
+                        "version of exactly the same colour."),
+            _guide_item("Swatches tab",
+                        "Forty-eight basic colours in four rows: the twelve colour "
+                        "wheel hues, their pastel tints, their deep shades, and the "
+                        "white-to-black neutral ramp."),
+            _guide_item("Hexagon tab",
+                        "The honeycomb of discrete shades: white in the middle, tints "
+                        "fanning out by hue, darker shades on the rim, with a "
+                        "black-to-white hexagon strip underneath. Hovering turns the "
+                        "pointer into a hand."),
+            _guide_item("Hex box and Use hex",
+                        "Type any hex colour — #RGB, #RRGGBB or the short form without "
+                        "# — and press Use hex or Enter. Anything that is not a colour "
+                        "is rejected with a “use #RRGGBB” hint."),
+            _guide_item("RGB readout",
+                        "The red, green and blue channels of the colour being edited, "
+                        "for cross-checking against a style guide."),
+            _guide_item("Primary / Accent / Background",
+                        "Which role the next colour fills. Primary paints headings and "
+                        "the main buttons, Accent paints highlights, progress and "
+                        "selections, and Background paints the window, panels and the "
+                        "text area. Readable foregrounds (light or dark) are derived "
+                        "automatically, so text never becomes invisible."),
+            _guide_item("Live preview",
+                        "A miniature AutoTyper panel painted with your three colours, "
+                        "updated as you pick."),
+            _guide_item("Palette name and Save colours",
+                        "Name the set and save it — it appears with a ★ in the palette "
+                        "grid and is applied immediately. Up to sixteen custom palettes "
+                        "are kept; Cancel discards the dialog without saving."),
+        ),
+    ),
+    GuideSection(
+        "Keyboard shortcuts", "Faster than reaching for the mouse.",
+        (
+            _guide_item("Ctrl+Enter", "Start a job from anywhere in the window."),
+            _guide_item("Esc", "Stop a running job (does nothing when idle)."),
+            _guide_item("F1", "Open this guide from anywhere in the app."),
+            _guide_item("Ctrl+A", "Select all of the source text box."),
+        ),
+    ),
+    GuideSection(
+        "Troubleshooting", "The handful of things that usually go wrong.",
+        (
+            _guide_item("Nothing gets typed",
+                        "Keystrokes go to whatever window has focus when the countdown "
+                        "ends. Click your target window during the countdown. If "
+                        "AutoTyper stayed on top, untick “Keep AutoTyper above other "
+                        "applications” in Settings."),
+            _guide_item("Characters go missing in games or remote desktops",
+                        "Some applications drop very fast synthetic input. Lower the "
+                        "WPM, or run the target application and AutoTyper at the same "
+                        "privilege level (both normal, or both as administrator)."),
+            _guide_item("“Completed — verification unavailable”",
+                        "The focused window did not answer the select-all/copy probe. "
+                        "The typing itself finished; turn off “Verify and repair target "
+                        "editor” to skip the check."),
+            _guide_item("“mismatch repaired” or an execution failure",
+                        "The target editor contained other text, or its auto-indent "
+                        "differs from the chosen policy. Empty the target document, "
+                        "double-check the indentation setting, and try again with a "
+                        "lower typo rate."),
+            _guide_item("No update is ever announced",
+                        "The check is deliberately silent: no internet, a blocked "
+                        "github.com or no newer release all stay quiet. Use “Check for "
+                        "updates now” for an explicit answer."),
+            _guide_item("macOS or Linux typing does not land",
+                        "macOS needs Accessibility permission for the app that launches "
+                        "AutoTyper (System Settings → Privacy & Security → "
+                        "Accessibility). On Linux, pynput needs an X11 session (or the "
+                        "uinput backend) and may need to be run as the desktop user."),
+            _guide_item("Where settings live",
+                        "~/.autotyper_settings.json holds your palette, custom colours "
+                        "and window preferences. Deleting it restores the defaults — it "
+                        "never lives inside the AutoTyper folder."),
+        ),
+    ),
+)
+
+GUIDE_SECTIONS: Tuple[GuideSection, ...] = _GUIDE_ITEMS
+
+
+def guide_item_count() -> int:
+    """Total number of documented controls (handy for tests and the header)."""
+    return sum(len(section.items) for section in GUIDE_SECTIONS)
+
+
+def filter_guide(sections, query: str) -> List[GuideSection]:
+    """Sections and entries matching ``query`` (case-insensitive, empty-safe)."""
+    needle = (query or "").strip().lower()
+    if not needle:
+        return list(sections)
+    matched: List[GuideSection] = []
+    for section in sections:
+        if needle in section.title.lower() or needle in section.blurb.lower():
+            matched.append(section)
+            continue
+        items = tuple(item for item in section.items
+                      if needle in item.name.lower() or needle in item.text.lower())
+        if items:
+            matched.append(GuideSection(section.title, section.blurb, items))
+    return matched
+
+
+class GuideWindow(_TkToplevel):
+    """The scrollable, searchable guide that explains the whole interface."""
+
+    def __init__(self, master, colours: Dict[str, str], *, topmost: bool = False,
+                 on_close=None):
+        super().__init__(master)
+        self.colours = dict(colours)
+        self._on_close = on_close
+        self._binder = PaletteBinder(self.colours)
+        c = self.colours
+
+        self.title("AutoTyper Guide — what everything does")
+        self.geometry("800x740")
+        self.minsize(620, 420)
+        self.configure(background=c["background"])
+        self.protocol("WM_DELETE_WINDOW", self.close)
+        if topmost:
+            try:
+                self.wm_attributes("-topmost", True)
+            except tk.TclError:
+                pass
+
+        header = tk.Frame(self, bg=c["background"], padx=22, pady=14)
+        header.pack(fill="x")
+        self._binder.register(header, "background", window=self)
+        self._heading = tk.Label(header, text="📖 AutoTyper Guide",
+                                 bg=c["background"], fg=c["primary"],
+                                 font=("Segoe UI", 18, "bold"))
+        self._heading.pack(anchor="w")
+        self._binder.register(self._heading, "heading", window=self)
+        self._subtitle = tk.Label(
+            header,
+            text=f"Every control in the window, explained — {guide_item_count()} topics.",
+            bg=c["background"], fg=c["muted"], font=("Segoe UI", 10))
+        self._subtitle.pack(anchor="w", pady=(2, 10))
+        self._binder.register(self._subtitle, "muted", window=self)
+
+        search = tk.Frame(header, bg=c["background"])
+        search.pack(fill="x")
+        self._binder.register(search, "background", window=self)
+        label = tk.Label(search, text="Search", bg=c["background"], fg=c["foreground"],
+                         font=("Segoe UI", 9, "bold"))
+        label.pack(side="left")
+        self._binder.register(label, "body", window=self)
+        self.filter_var = tk.StringVar(value="")
+        self.filter_entry = tk.Entry(search, textvariable=self.filter_var,
+                                     bg=c["surface"], fg=c["foreground"],
+                                     insertbackground=c["foreground"], relief="flat",
+                                     highlightthickness=1,
+                                     highlightbackground=c["muted"],
+                                     highlightcolor=c["accent"], font=("Segoe UI", 10))
+        self.filter_entry.pack(side="left", fill="x", expand=True, padx=(8, 8))
+        self._binder.register(self.filter_entry, "field", window=self)
+        for sequence in ("<KeyRelease>", "<Return>"):
+            self.filter_entry.bind(sequence, lambda event: self.render())
+        clear = tk.Button(search, text="Clear", command=self._clear_filter, relief="flat",
+                          bg=c["surface"], fg=c["foreground"],
+                          activebackground=c["muted"], padx=10, pady=2,
+                          font=("Segoe UI", 9))
+        clear.pack(side="right")
+        self._binder.register(clear, "button", window=self)
+
+        self._count_label = tk.Label(header, text="", bg=c["background"], fg=c["muted"],
+                                     font=("Segoe UI", 8))
+        self._count_label.pack(anchor="w", pady=(6, 0))
+        self._binder.register(self._count_label, "muted", window=self)
+
+        scroller = tk.Canvas(self, bg=c["background"], highlightthickness=0, bd=0)
+        scrollbar = ttk.Scrollbar(self, orient="vertical", command=scroller.yview,
+                                  style="App.Vertical.TScrollbar")
+        scroller.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        scroller.pack(side="left", fill="both", expand=True)
+        self._scroller = scroller
+
+        self._body = tk.Frame(scroller, bg=c["background"], padx=22, pady=8)
+        self._binder.register(self._body, "background", window=self)
+        body_id = scroller.create_window((0, 0), window=self._body, anchor="nw")
+        self._body.bind("<Configure>",
+                        lambda event: scroller.configure(scrollregion=scroller.bbox("all")))
+        self._body.bind("<Configure>", self._rewrap, add="+")
+        scroller.bind("<Configure>",
+                      lambda event: scroller.itemconfigure(body_id, width=event.width))
+        self._wheel_sequences = bind_wheel_scrolling(scroller)
+
+        footer = tk.Frame(self, bg=c["background"], padx=22, pady=12)
+        footer.pack(fill="x")
+        self._binder.register(footer, "background", window=self)
+        close = tk.Button(footer, text="Got it — start typing", command=self.close,
+                          relief="flat", padx=16, pady=6,
+                          font=("Segoe UI", 10, "bold"))
+        close.pack(side="right")
+        self._binder.register(close, "accent", window=self)
+        self._hint = tk.Label(footer, text="Tip: press F1 at any time to reopen this guide.",
+                              bg=c["background"], fg=c["muted"], font=("Segoe UI", 9))
+        self._hint.pack(side="left")
+        self._binder.register(self._hint, "muted", window=self)
+
+        self._section_widgets: List[object] = []
+        self._text_labels: List[tk.Label] = []
+        self.render()
+
+    # ------------------------------------------------------------------
+    def _clear_filter(self):
+        self.filter_var.set("")
+        self.render()
+
+    def _rewrap(self, event=None):
+        """Keep the description column inside the window as it is resized."""
+        width = getattr(event, "width", 0)
+        if not width:
+            try:
+                width = self._body.winfo_width()
+            except tk.TclError:
+                return
+        wraplength = max(260, int(width) - 320)
+        for label in self._text_labels:
+            try:
+                label.configure(wraplength=wraplength)
+            except tk.TclError:
+                pass
+
+    def _theme_section_widget(self, widget, role):
+        self._section_widgets.append(widget)
+        self._binder.register(widget, role, window=self)
+        return widget
+
+    def render(self):
+        """(Re)draw the guide body, honouring the search box."""
+        try:
+            for widget in self._section_widgets:
+                widget.destroy()
+        except tk.TclError:
+            pass
+        self._section_widgets = []
+        self._text_labels = []
+
+        c = self.colours
+        query = self.filter_var.get()
+        sections = filter_guide(GUIDE_SECTIONS, query)
+
+        if not sections:
+            empty = self._theme_section_widget(
+                tk.Label(self._body, text=f"No topic matches “{query.strip()}”.",
+                         bg=c["background"], fg=c["muted"], font=("Segoe UI", 10)),
+                "muted")
+            empty.pack(anchor="w", pady=20)
+            self._count_label.configure(text="0 topics shown — try WPM, colours or stop.")
+            return
+
+        shown = sum(len(section.items) for section in sections)
+        self._count_label.configure(
+            text=f"Showing {shown} of {guide_item_count()} topics"
+                 + (f" — matching “{query.strip()}”" if query.strip() else ""))
+
+        for section in sections:
+            block = tk.Frame(self._body, bg=c["background"])
+            block.pack(fill="x", pady=(14, 4))
+            self._theme_section_widget(block, "background")
+            title = self._theme_section_widget(
+                tk.Label(block, text=section.title, bg=c["background"], fg=c["primary"],
+                         font=("Segoe UI", 12, "bold")), "heading")
+            title.pack(anchor="w")
+            blurb = self._theme_section_widget(
+                tk.Label(block, text=section.blurb, bg=c["background"], fg=c["muted"],
+                         font=("Segoe UI", 9)), "muted")
+            blurb.pack(anchor="w", pady=(1, 6))
+
+            for item in section.items:
+                row = tk.Frame(block, bg=c["background"])
+                row.pack(fill="x", pady=2)
+                self._theme_section_widget(row, "background")
+                name = self._theme_section_widget(
+                    tk.Label(row, text=item.name, bg=c["background"],
+                             fg=c["foreground"], font=("Segoe UI", 9, "bold"),
+                             anchor="nw", justify="left", width=30), "body")
+                name.grid(row=0, column=0, sticky="nw", padx=(0, 10))
+                text = self._theme_section_widget(
+                    tk.Label(row, text=item.text, bg=c["background"],
+                             fg=c["foreground"], font=("Segoe UI", 9),
+                             anchor="nw", justify="left", wraplength=470), "body")
+                text.grid(row=0, column=1, sticky="nw")
+                self._text_labels.append(text)
+                row.columnconfigure(1, weight=1)
+
+        self._scroller.configure(scrollregion=self._scroller.bbox("all"))
+
+    def apply_palette(self, colours: Dict[str, str]):
+        """Repaint the guide when the app palette changes underneath it."""
+        self.colours = dict(colours)
+        self.configure(background=self.colours["background"])
+        self._binder.apply(self.colours)
+        try:
+            self._scroller.configure(bg=self.colours["background"])
+        except tk.TclError:
+            pass
+
+    def close(self):
+        release_wheel_scrolling(self, getattr(self, "_wheel_sequences", ()))
+        self._binder.forget(self)
+        if self._on_close is not None:
+            try:
+                self._on_close()
+            except tk.TclError:
+                pass
+        try:
+            self.destroy()
+        except tk.TclError:
+            pass
+
+
+class _HoverTip:
+    """A small hover help bubble for one widget.
+
+    Deliberately lazy: nothing is created until the pointer actually rests on
+    the widget, and every Tk call is guarded, so a window manager that dislikes
+    override-redirect windows cannot break the app.
+    """
+
+    def __init__(self, widget, text: str, delay: int = 550, wraplength: int = 330):
+        self.widget = widget
+        self.text = text
+        self.delay = delay
+        self.wraplength = wraplength
+        self._tip = None
+        self._after_id = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<Button-1>", self._hide, add="+")
+
+    def _cancel(self):
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
+
+    def _schedule(self, event=None):
+        self._cancel()
+        try:
+            self._after_id = self.widget.after(self.delay, self._show)
+        except tk.TclError:
+            self._after_id = None
+
+    def _show(self):
+        if self._tip is not None:
+            return
+        try:
+            x = self.widget.winfo_rootx() + 14
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
+            self._tip = tk.Toplevel(self.widget)
+            self._tip.wm_overrideredirect(True)
+            self._tip.wm_geometry(f"+{x}+{y}")
+            tk.Label(self._tip, text=self.text, justify="left", background="#111827",
+                     foreground="#F9FAFB", relief="solid", borderwidth=1,
+                     wraplength=self.wraplength, font=("Segoe UI", 9),
+                     padx=8, pady=6).pack()
+            self._tip.wm_attributes("-topmost", True)
+        except tk.TclError:
+            self._tip = None
+
+    def _hide(self, event=None):
+        self._cancel()
+        tip, self._tip = self._tip, None
+        if tip is None:
+            return
+        try:
+            tip.destroy()
+        except tk.TclError:
+            pass
+
+
+def attach_tooltip(widget, text: str):
+    """Best-effort hover help: never raises, never blocks the interface."""
+    if tk is None or not text:
+        return None
+    try:
+        return _HoverTip(widget, text)
+    except Exception:
+        return None
+
+
 class AutoTyperApp(_TkBase):
     """The V2 desktop interface.
 
@@ -2689,8 +4164,8 @@ class AutoTyperApp(_TkBase):
     def __init__(self):
         super().__init__()
         self.title("AutoTyper — Biomechanical Keystroke Simulator")
-        self.geometry("780x980")
-        self.minsize(680, 760)
+        self.geometry("820x900")
+        self.minsize(700, 680)
         self.resizable(True, True)
 
         self.is_running = False
@@ -2704,17 +4179,22 @@ class AutoTyperApp(_TkBase):
             self.palette_name = DEFAULT_PALETTE
         self.palette_var = tk.StringVar(value=self.palette_name)
         self.topmost_var = tk.BooleanVar(value=bool(saved_settings.get("topmost", True)))
+        self.guide_seen = bool(saved_settings.get("guide_seen", False))
         self.colors = _palette_colours(self.palette_name, self.available_palettes())
+        # One registry paints the whole main window, so a palette switch never
+        # has to know which widgets exist.
+        self._binder = PaletteBinder(self.colors)
+        self._settings_binder = PaletteBinder(self.colors)
         self._settings_window = None
         self._settings_cards = []
-        self._settings_theme_widgets = []
-        self._settings_headings = []
         self._palette_grid = None
         self._custom_hint = None
         self._custom_editor = None
+        self._guide_window = None
         self._preview_widgets = {}
         self._comboboxes = []
         self._download_thread = None
+        self.count_var = tk.StringVar(value="")
 
         try:
             self.style = ttk.Style(self)
@@ -2726,10 +4206,100 @@ class AutoTyperApp(_TkBase):
         self._build_ui()
         self._apply_palette(self.palette_name)
         self._apply_topmost()
+        self._bind_shortcuts()
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._poll_id = self.after(50, self._poll_queue)
         self._start_update_check()
+        if not self.guide_seen:
+            # First launch: show what everything does, once.
+            self.after(600, self._open_guide)
+
+    # ------------------------------------------------------------------
+    # Theming helpers
+    # ------------------------------------------------------------------
+    def _card(self, parent, title: str, subtitle: str = "", expand: bool = False):
+        """A titled panel with consistent spacing; returns the body to fill.
+
+        ``expand`` lets the card absorb spare vertical space — used by the text
+        card so the editor grows with the window instead of leaving a gap.
+        """
+        c = self.colors
+        card = tk.Frame(parent, bg=c["background"], highlightthickness=1,
+                        highlightbackground=c["surface"], highlightcolor=c["surface"],
+                        padx=16, pady=13)
+        if expand:
+            card.pack(fill="both", expand=True, pady=(0, 12))
+        else:
+            card.pack(fill="x", pady=(0, 12))
+        self._binder.register(card, "card", window="main")
+        heading = tk.Label(card, text=title, bg=c["background"], fg=c["primary"],
+                           font=("Segoe UI", 11, "bold"))
+        heading.pack(anchor="w")
+        self._binder.register(heading, "heading", window="main")
+        if subtitle:
+            note = tk.Label(card, text=subtitle, bg=c["background"], fg=c["muted"],
+                            font=("Segoe UI", 9))
+            note.pack(anchor="w", pady=(1, 9))
+            self._binder.register(note, "muted", window="main")
+        body = tk.Frame(card, bg=c["background"])
+        body.pack(fill="both", expand=True)
+        self._binder.register(body, "background", window="main")
+        return body
+
+    def _row(self, body, row: int, label: str, widget, tip: str = "", pady: int = 5):
+        """Place a right-aligned control with its label on the left."""
+        c = self.colors
+        caption = tk.Label(body, text=label, bg=c["background"], fg=c["foreground"],
+                           font=("Segoe UI", 10), anchor="w")
+        caption.grid(row=row, column=0, sticky="w", pady=pady)
+        self._binder.register(caption, "body", window="main")
+        widget.grid(row=row, column=1, sticky="e", pady=pady)
+        if tip:
+            attach_tooltip(caption, tip)
+        return widget
+
+    def _check_row(self, body, row: int, text: str, variable, tip: str = ""):
+        widget = ttk.Checkbutton(body, text=text, variable=variable,
+                                 style="App.TCheckbutton")
+        widget.grid(row=row, column=0, columnspan=2, sticky="w", pady=3)
+        if tip:
+            attach_tooltip(widget, tip)
+        return widget
+
+    def _paint_text_box(self):
+        if not hasattr(self, "text_box"):
+            return
+        c = self.colors
+        self.text_box.configure(
+            background=c["surface"], foreground=c["foreground"],
+            insertbackground=c["accent"], selectbackground=c["accent"],
+            selectforeground=c["accent_foreground"],
+            highlightbackground=c["primary"], highlightcolor=c["accent"])
+
+    def _bind_shortcuts(self):
+        """Ctrl+Enter starts, Esc stops, F1 opens the guide."""
+        try:
+            self.bind("<Control-Return>", self._shortcut_start)
+            self.bind("<Control-KP_Enter>", self._shortcut_start)
+            self.bind("<Escape>", self._shortcut_stop)
+            self.bind("<F1>", self._shortcut_guide)
+        except tk.TclError:
+            pass
+
+    def _shortcut_start(self, event=None):
+        if not self.is_running:
+            self.start_process()
+        return "break"
+
+    def _shortcut_stop(self, event=None):
+        if self.is_running:
+            self.stop_process()
+        return "break"
+
+    def _shortcut_guide(self, event=None):
+        self._open_guide()
+        return "break"
 
     # ------------------------------------------------------------------
     # Theme and settings window
@@ -2809,6 +4379,7 @@ class AutoTyperApp(_TkBase):
             path.write_text(json.dumps({
                 "palette": self.palette_name,
                 "topmost": bool(self.topmost_var.get()),
+                "guide_seen": bool(self.guide_seen),
                 "custom_palettes": {name: list(triple)
                                     for name, triple in self.custom_palettes.items()},
             }, indent=2) + "\n", encoding="utf-8")
@@ -2891,6 +4462,7 @@ class AutoTyperApp(_TkBase):
         self._apply_palette(DEFAULT_PALETTE)
 
     def _apply_palette(self, name: str):
+        """Switch palette: restyle everything that is currently on screen."""
         palettes = self.available_palettes()
         if name not in palettes:
             name = DEFAULT_PALETTE
@@ -2900,28 +4472,29 @@ class AutoTyperApp(_TkBase):
         self._save_ui_settings()
         self.configure(background=self.colors["background"])
         self._configure_styles()
-
-        if hasattr(self, "text_box"):
-            self.text_box.configure(
-                background=self.colors["surface"],
-                foreground=self.colors["foreground"],
-                insertbackground=self.colors["accent"],
-                selectbackground=self.colors["accent"],
-                selectforeground=self.colors["accent_foreground"],
-                highlightbackground=self.colors["primary"],
-                highlightcolor=self.colors["accent"],
-            )
-        for scale in (getattr(self, "wpm_scale", None), getattr(self, "typo_scale", None)):
-            if scale is not None:
-                scale.configure(
-                    bg=self.colors["background"],
-                    fg=self.colors["foreground"],
-                    troughcolor=self.colors["surface"],
-                    activebackground=self.colors["accent"],
-                    highlightbackground=self.colors["background"],
-                )
+        self._binder.apply(self.colors)
+        self._paint_text_box()
+        self._refresh_palette_cards()
         self._refresh_settings_window()
         self._style_combobox_dropdowns()
+        self._restyle_open_windows(self.colors)
+
+    def _restyle_open_windows(self, colours: Dict[str, str]):
+        """Repaint the guide and the colour studio if they are open."""
+        guide = getattr(self, "_guide_window", None)
+        if guide is not None:
+            try:
+                if guide.winfo_exists():
+                    guide.apply_palette(colours)
+            except tk.TclError:
+                self._guide_window = None
+        editor = getattr(self, "_custom_editor", None)
+        if editor is not None:
+            try:
+                if editor.winfo_exists():
+                    editor.apply_palette(colours)
+            except tk.TclError:
+                self._custom_editor = None
 
     def _style_combobox_dropdowns(self):
         """Apply the palette to the native ttk combobox pop-down list.
@@ -2966,6 +4539,7 @@ class AutoTyperApp(_TkBase):
         self._apply_palette(name)
 
     def _open_settings(self):
+        """Appearance & Window Settings, built from tidy cards."""
         if self._settings_window is not None and self._settings_window.winfo_exists():
             self._settings_window.deiconify()
             self._settings_window.lift()
@@ -2975,8 +4549,8 @@ class AutoTyperApp(_TkBase):
         window = tk.Toplevel(self)
         self._settings_window = window
         window.title("AutoTyper — Appearance & Window Settings")
-        window.geometry("720x840")
-        window.minsize(640, 620)
+        window.geometry("760x840")
+        window.minsize(660, 560)
         window.configure(background=c["background"])
         window.protocol("WM_DELETE_WINDOW", self._close_settings)
         if self.topmost_var.get():
@@ -2999,35 +4573,45 @@ class AutoTyperApp(_TkBase):
                    lambda event: scroller.configure(scrollregion=scroller.bbox("all")))
         scroller.bind("<Configure>",
                       lambda event: scroller.itemconfigure(body_id, width=event.width))
-        self._bind_settings_mousewheel(scroller)
+        self._settings_wheel_sequences = bind_wheel_scrolling(scroller)
+        self._settings_scroller = scroller
+        self._settings_binder.register(scroller, "background", window="settings")
+        self._settings_binder.register(outer, "background", window="settings")
 
-        self._settings_title = tk.Label(outer, text="Appearance & Window Settings", bg=c["background"],
-                                        fg=c["primary"], font=("Segoe UI", 18, "bold"))
+        self._settings_title = tk.Label(outer, text="Appearance & Window Settings",
+                                        bg=c["background"], fg=c["primary"],
+                                        font=("Segoe UI", 18, "bold"))
         self._settings_title.pack(anchor="w")
         self._settings_subtitle = tk.Label(
-            outer, text="Choose a palette, design your own colours, and keep the typer visible while you work.",
+            outer,
+            text="Choose a palette, design your own colours, and keep the typer "
+                 "visible while you work.",
             bg=c["background"], fg=c["muted"], font=("Segoe UI", 10))
         self._settings_subtitle.pack(anchor="w", pady=(2, 14))
+        self._settings_binder.register(self._settings_title, "heading", window="settings")
+        self._settings_binder.register(self._settings_subtitle, "muted", window="settings")
 
-        palette_box = tk.LabelFrame(outer, text=" Colour palette ", bg=c["background"],
-                                    fg=c["primary"], bd=1, relief="groove",
-                                    padx=12, pady=10, font=("Segoe UI", 10, "bold"))
-        palette_box.pack(fill="both", expand=True)
-        grid = tk.Frame(palette_box, bg=c["background"])
+        palette_card = self._settings_card(
+            outer, "Colour palette",
+            "Click a card to apply it everywhere, instantly. Your choice is remembered.",
+            expand=True)
+        grid = tk.Frame(palette_card, bg=c["background"])
         grid.pack(fill="both", expand=True)
+        self._settings_binder.register(grid, "background", window="settings")
         self._palette_grid = grid
 
-        custom_box = tk.LabelFrame(outer, text=" Custom UI colour ", bg=c["background"],
-                                   fg=c["primary"], bd=1, relief="groove",
-                                   padx=12, pady=10, font=("Segoe UI", 10, "bold"))
-        custom_box.pack(fill="x", pady=(14, 0))
+        custom_card = self._settings_card(
+            outer, "Custom UI colour",
+            "Design your own palette on the Paint-style colour studio and save it "
+            "with the built-ins.")
         self._custom_hint = tk.Label(
-            custom_box,
-            text="", bg=c["background"], fg=c["muted"], font=("Segoe UI", 9),
+            custom_card, text="", bg=c["background"], fg=c["muted"], font=("Segoe UI", 9),
             justify="left", anchor="w")
         self._custom_hint.pack(anchor="w", pady=(0, 8))
-        custom_buttons = tk.Frame(custom_box, bg=c["background"])
+        self._settings_binder.register(self._custom_hint, "muted", window="settings")
+        custom_buttons = tk.Frame(custom_card, bg=c["background"])
         custom_buttons.pack(anchor="w")
+        self._settings_binder.register(custom_buttons, "background", window="settings")
         ttk.Button(custom_buttons, text="🎨 New colours…", style="Accent.TButton",
                    command=lambda: self._open_custom_editor(None)).pack(side="left")
         ttk.Button(custom_buttons, text="Edit selected", style="App.TButton",
@@ -3035,76 +4619,102 @@ class AutoTyperApp(_TkBase):
         ttk.Button(custom_buttons, text="Delete selected", style="App.TButton",
                    command=self._delete_custom_palette).pack(side="left", padx=(8, 0))
 
-        controls = tk.Frame(outer, bg=c["background"])
-        controls.pack(fill="x", pady=(14, 10))
+        window_card = self._settings_card(
+            outer, "Window & updates",
+            "How AutoTyper behaves while you work, and how it keeps itself current.")
         self._topmost_checkbutton = tk.Checkbutton(
-            controls,
-            text="Keep Auto-Typer above other applications (prevents it disappearing when you click your editor)",
+            window_card,
+            text="Keep AutoTyper above other applications (so it cannot hide behind "
+                 "your editor)",
             variable=self.topmost_var,
             command=self._apply_topmost,
             bg=c["background"], fg=c["foreground"],
             activebackground=c["background"], activeforeground=c["foreground"],
-            selectcolor=c["surface"], anchor="w",
-        )
+            selectcolor=c["surface"], anchor="w", justify="left")
         self._topmost_checkbutton.pack(anchor="w")
-        self._update_check_button = ttk.Button(
-            controls, text="Check for updates now", style="App.TButton",
-            command=self._manual_update_check)
-        self._update_check_button.pack(anchor="w", pady=(10, 0))
-        self._download_exe_button = ttk.Button(
-            controls, text="⬇ Download latest AutoTyper.exe", style="App.TButton",
-            command=self._start_exe_download)
-        self._download_exe_button.pack(anchor="w", pady=(8, 0))
+        self._settings_binder.register(self._topmost_checkbutton, "selectable",
+                                       window="settings",
+                                       selectcolor=c["surface"])
+        controls = tk.Frame(window_card, bg=c["background"])
+        controls.pack(anchor="w", pady=(10, 0))
+        self._settings_binder.register(controls, "background", window="settings")
+        self._update_check_button = ttk.Button(controls, text="Check for updates now",
+                                               style="App.TButton",
+                                               command=self._manual_update_check)
+        self._update_check_button.pack(side="left")
+        self._download_exe_button = ttk.Button(controls,
+                                               text="⬇ Download latest AutoTyper.exe",
+                                               style="App.TButton",
+                                               command=self._start_exe_download)
+        self._download_exe_button.pack(side="left", padx=(8, 0))
+        ttk.Button(controls, text="❓ Open the guide", style="App.TButton",
+                   command=self._open_guide).pack(side="left", padx=(8, 0))
 
-        preview_box = tk.LabelFrame(outer, text=" Live preview ", bg=c["background"],
-                                    fg=c["primary"], bd=1, relief="groove",
-                                    padx=12, pady=10, font=("Segoe UI", 10, "bold"))
-        preview_box.pack(fill="x", pady=(0, 10))
-        preview = tk.Frame(preview_box, bg=c["background"], height=86)
+        preview_card = self._settings_card(
+            outer, "Live preview", "Your palette on a sample title, body and button.")
+        preview = tk.Frame(preview_card, bg=c["background"], height=92)
         preview.pack(fill="x")
         preview.pack_propagate(False)
+        self._settings_binder.register(preview, "background", window="settings")
         self._preview_widgets = {
             "frame": preview,
             "title": tk.Label(preview, text="AutoTyper", font=("Segoe UI", 13, "bold")),
-            "body": tk.Label(preview, text="Settings preview — your selected palette is applied immediately.",
+            "body": tk.Label(preview, text="Settings preview — your selected palette is "
+                                           "applied immediately.",
                              font=("Segoe UI", 9)),
             "button": tk.Button(preview, text="Accent button", relief="flat", padx=12, pady=4),
         }
-        self._preview_widgets["title"].pack(side="left", padx=(4, 20), pady=22)
-        self._preview_widgets["body"].pack(side="left", fill="x", expand=True, pady=22)
-        self._preview_widgets["button"].pack(side="right", padx=4, pady=20)
+        self._preview_widgets["title"].pack(side="left", padx=(4, 20), pady=24)
+        self._preview_widgets["body"].pack(side="left", fill="x", expand=True, pady=24)
+        self._preview_widgets["button"].pack(side="right", padx=4, pady=22)
 
-        self._settings_theme_widgets = [scroller, outer, palette_box, grid, custom_box,
-                                        custom_buttons, controls, preview_box, preview,
-                                        self._settings_title, self._settings_subtitle,
-                                        self._custom_hint, self._topmost_checkbutton]
-        self._settings_headings = [palette_box, custom_box, preview_box]
-
-        ttk.Button(outer, text="Close", style="App.TButton", command=self._close_settings).pack(anchor="e")
+        footer = tk.Frame(outer, bg=c["background"])
+        footer.pack(fill="x", pady=(6, 0))
+        self._settings_binder.register(footer, "background", window="settings")
+        ttk.Button(footer, text="Close", style="App.TButton",
+                   command=self._close_settings).pack(side="right")
+        self._settings_hint = tk.Label(
+            footer, text="Every option applies immediately — there is no OK button.",
+            bg=c["background"], fg=c["muted"], font=("Segoe UI", 9))
+        self._settings_hint.pack(side="left")
+        self._settings_binder.register(self._settings_hint, "muted", window="settings")
 
         self._refresh_palette_cards()
         self._refresh_settings_window()
 
+    def _settings_card(self, parent, title: str, subtitle: str = "", expand: bool = False):
+        """A titled card for the settings window; returns the body to fill."""
+        c = self.colors
+        card = tk.Frame(parent, bg=c["background"], highlightthickness=1,
+                        highlightbackground=c["surface"], highlightcolor=c["surface"],
+                        padx=14, pady=12)
+        card.pack(fill="both" if expand else "x", expand=expand, pady=(0, 12))
+        self._settings_binder.register(card, "card", window="settings")
+        heading = tk.Label(card, text=title, bg=c["background"], fg=c["primary"],
+                           font=("Segoe UI", 11, "bold"))
+        heading.pack(anchor="w")
+        self._settings_binder.register(heading, "heading", window="settings")
+        if subtitle:
+            note = tk.Label(card, text=subtitle, bg=c["background"], fg=c["muted"],
+                            font=("Segoe UI", 9), justify="left", anchor="w")
+            note.pack(anchor="w", pady=(1, 8))
+            self._settings_binder.register(note, "muted", window="settings")
+        body = tk.Frame(card, bg=c["background"])
+        body.pack(fill="both", expand=True)
+        self._settings_binder.register(body, "background", window="settings")
+        return body
+
     def _bind_settings_mousewheel(self, scroller):
-        """Scroll the settings body with the wheel on Windows, macOS and X11."""
-        def on_wheel(event):
-            if event.num == 4:
-                delta = -1
-            elif event.num == 5:
-                delta = 1
-            else:
-                delta = -1 if event.delta > 0 else 1
-            scroller.yview_scroll(delta, "units")
-        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-            scroller.bind_all(sequence, on_wheel, add="+")
-        self._settings_wheel_bindings = ("<MouseWheel>", "<Button-4>", "<Button-5>")
+        """Scroll the settings body with the wheel (kept for compatibility)."""
+        self._settings_wheel_sequences = bind_wheel_scrolling(scroller)
+        return self._settings_wheel_sequences
 
     def _edit_selected_custom_palette(self):
         if not self.is_custom_palette(self.palette_name):
             messagebox.showinfo(
                 "Pick your own colours first",
                 "Select one of your saved custom palettes to edit it, or press "
-                "“New colours…” to design one from the colour hexagon.")
+                "“New colours…” to design one from the colour studio.")
             return
         self._open_custom_editor(self.palette_name)
 
@@ -3135,7 +4745,8 @@ class AutoTyperApp(_TkBase):
             custom = self.is_custom_palette(name)
             card = tk.Frame(grid, bg=c["background"], padx=7, pady=7,
                             highlightthickness=1, highlightbackground=c["surface"])
-            card.grid(row=index // columns, column=index % columns, sticky="nsew", padx=4, pady=4)
+            card.grid(row=index // columns, column=index % columns, sticky="nsew",
+                      padx=4, pady=4)
             radio = tk.Radiobutton(card, text=("★ " + name) if custom else name,
                                    variable=self.palette_var, value=name,
                                    command=lambda selected=name: self._choose_palette(selected),
@@ -3149,14 +4760,16 @@ class AutoTyperApp(_TkBase):
             swatches.pack(anchor="w", pady=(5, 0))
             for colour in palettes[name]:
                 tk.Frame(swatches, width=28, height=16, bg=colour,
-                         highlightthickness=1, highlightbackground=c["foreground"]).pack(side="left", padx=(0, 3))
+                         highlightthickness=1,
+                         highlightbackground=c["foreground"]).pack(side="left", padx=(0, 3))
             self._settings_cards.append((card, radio, swatches, name))
 
             # Make the whole card, including whitespace and colour swatches,
             # behave like one large palette selector instead of requiring a
             # precise click on the radio control.
             for selectable in (card, radio, swatches, *swatches.winfo_children()):
-                selectable.bind("<Button-1>", lambda event, selected=name: self._choose_palette(selected))
+                selectable.bind("<Button-1>",
+                                lambda event, selected=name: self._choose_palette(selected))
             if custom:
                 for selectable in (card, radio, swatches, *swatches.winfo_children()):
                     selectable.bind("<Double-Button-1>",
@@ -3166,8 +4779,9 @@ class AutoTyperApp(_TkBase):
             try:
                 saved = len(self.custom_palettes)
                 self._custom_hint.configure(
-                    text=("Design your own palette on the Microsoft-style colour hexagon: pick a "
-                          "primary, accent and background colour, name it and save.\n"
+                    text=("Pick a primary, accent and background colour on the colour "
+                          "studio — gradient, swatches or hexagon — then name and save "
+                          "it.\n"
                           f"Saved custom palettes: {saved} of {MAX_CUSTOM_PALETTES}"
                           " — they appear with a ★ above (double-click one to edit it)."))
             except tk.TclError:
@@ -3183,52 +4797,44 @@ class AutoTyperApp(_TkBase):
             return
         c = self.colors
         self._settings_window.configure(background=c["background"])
-        for widget in self._settings_theme_widgets:
-            try:
-                widget.configure(bg=c["background"])
-            except tk.TclError:
-                pass
-        self._settings_title.configure(bg=c["background"], fg=c["primary"])
-        self._settings_subtitle.configure(bg=c["background"], fg=c["muted"])
-        if self._custom_hint is not None:
-            try:
-                self._custom_hint.configure(bg=c["background"], fg=c["muted"])
-            except tk.TclError:
-                pass
-        self._topmost_checkbutton.configure(
-            bg=c["background"], fg=c["foreground"],
-            activebackground=c["background"], activeforeground=c["foreground"],
-            selectcolor=c["surface"],
-        )
-        for widget in self._settings_headings:
-            try:
-                widget.configure(fg=c["primary"])
-            except tk.TclError:
-                pass
+        self._settings_binder.apply(c)
+        try:
+            self._settings_scroller.configure(bg=c["background"])
+        except (tk.TclError, AttributeError):
+            pass
         for card, radio, swatches, name in self._settings_cards:
-            card.configure(bg=c["background"], highlightbackground=c["accent"] if name == self.palette_name else c["surface"])
-            radio.configure(bg=c["background"], fg=c["foreground"],
-                            activebackground=c["background"], activeforeground=c["foreground"],
-                            selectcolor=c["surface"])
-            swatches.configure(bg=c["background"])
+            try:
+                card.configure(bg=c["background"],
+                               highlightbackground=c["accent"]
+                               if name == self.palette_name else c["surface"])
+                radio.configure(bg=c["background"], fg=c["foreground"],
+                                activebackground=c["background"],
+                                activeforeground=c["foreground"],
+                                selectcolor=c["surface"])
+                swatches.configure(bg=c["background"])
+                for chip in swatches.winfo_children():
+                    chip.configure(highlightbackground=c["foreground"])
+            except tk.TclError:
+                continue
         for key, widget in self._preview_widgets.items():
-            if key == "frame":
-                widget.configure(bg=c["background"])
-            elif key == "title":
-                widget.configure(bg=c["background"], fg=c["primary"])
-            elif key == "body":
-                widget.configure(bg=c["background"], fg=c["foreground"])
-            elif key == "button":
-                widget.configure(bg=c["accent"], fg=c["accent_foreground"],
-                                 activebackground=c["primary"], activeforeground="#FFFFFF")
+            try:
+                if key == "frame":
+                    widget.configure(bg=c["background"])
+                elif key == "title":
+                    widget.configure(bg=c["background"], fg=c["primary"])
+                elif key == "body":
+                    widget.configure(bg=c["background"], fg=c["foreground"])
+                elif key == "button":
+                    widget.configure(bg=c["accent"], fg=c["accent_foreground"],
+                                     activebackground=c["primary"],
+                                     activeforeground=c["button_foreground"])
+            except tk.TclError:
+                continue
 
     def _close_settings(self):
-        for sequence in getattr(self, "_settings_wheel_bindings", ()):  # stop scrolling the dead window
-            try:
-                self.unbind_all(sequence)
-            except tk.TclError:
-                pass
-        self._settings_wheel_bindings = ()
+        release_wheel_scrolling(self, getattr(self, "_settings_wheel_sequences", ()))
+        self._settings_wheel_sequences = ()
+        self._settings_binder.forget("settings")
         if self._settings_window is not None:
             try:
                 self._settings_window.destroy()
@@ -3236,127 +4842,205 @@ class AutoTyperApp(_TkBase):
                 pass
         self._settings_window = None
         self._settings_cards = []
-        self._settings_theme_widgets = []
-        self._settings_headings = []
         self._palette_grid = None
         self._custom_hint = None
         self._preview_widgets = {}
+        self._settings_scroller = None
 
     # ------------------------------------------------------------------
-    # Main window
+    # Guide
     # ------------------------------------------------------------------
+    def _open_guide(self):
+        """Show the in-app guide (header button, F1, or first launch)."""
+        if self._guide_window is not None:
+            try:
+                if self._guide_window.winfo_exists():
+                    self._guide_window.deiconify()
+                    self._guide_window.lift()
+                    return
+            except tk.TclError:
+                pass
+        self._guide_window = GuideWindow(
+            self, self.colors,
+            topmost=bool(self.topmost_var.get()),
+            on_close=self._forget_guide)
+        if not self.guide_seen:
+            self.guide_seen = True
+            self._save_ui_settings()
+
+    def _forget_guide(self):
+        self._guide_window = None
+
+    def _close_guide(self):
+        guide = self._guide_window
+        self._guide_window = None
+        if guide is not None:
+            try:
+                guide.close()
+            except tk.TclError:
+                pass
+
     def _build_ui(self):
-        header = ttk.Frame(self, style="App.TFrame", padding=(24, 18, 24, 8))
+        """Main window: header, three tidy cards, and the run footer."""
+        c = self.colors
+
+        # ---- header ----------------------------------------------------
+        header = tk.Frame(self, bg=c["background"], padx=24, pady=16)
         header.pack(fill="x")
+        self._binder.register(header, "background", window="main")
         header.columnconfigure(0, weight=1)
-        ttk.Label(header, text="AutoTyper", style="Title.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(header, text="Biomechanical typing with Pascal-aware block navigation", style="Subtitle.TLabel").grid(
-            row=1, column=0, sticky="w", pady=(2, 0))
-        self.settings_btn = ttk.Button(header, text="⚙ Settings", style="App.TButton", command=self._open_settings)
-        self.settings_btn.grid(row=0, column=1, rowspan=2, sticky="e")
+        title = tk.Label(header, text="AutoTyper", bg=c["background"], fg=c["primary"],
+                         font=("Segoe UI", 20, "bold"))
+        title.grid(row=0, column=0, sticky="w")
+        self._binder.register(title, "heading", window="main")
+        subtitle = tk.Label(header,
+                            text="Biomechanical typing with Pascal-aware block navigation",
+                            bg=c["background"], fg=c["muted"], font=("Segoe UI", 9))
+        subtitle.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        self._binder.register(subtitle, "muted", window="main")
+
+        # Grid, not pack: the update button is added to this row later on and
+        # Tk does not allow mixing the two managers inside one container.
+        buttons = tk.Frame(header, bg=c["background"])
+        buttons.grid(row=0, column=1, rowspan=2, sticky="e")
+        self._binder.register(buttons, "background", window="main")
+        self.guide_btn = ttk.Button(buttons, text="❓ Guide", style="App.TButton",
+                                    command=self._open_guide)
+        self.guide_btn.grid(row=0, column=0, padx=(0, 6))
+        self.settings_btn = ttk.Button(buttons, text="⚙ Settings", style="App.TButton",
+                                       command=self._open_settings)
+        self.settings_btn.grid(row=0, column=1, padx=(0, 6))
         # Always available: fetches the published AutoTyper.exe from the
         # newest GitHub release, so getting the executable never requires
         # cloning the repository or installing Python.
-        self.download_btn = ttk.Button(header, text="⬇ Get .exe", style="App.TButton",
+        self.download_btn = ttk.Button(buttons, text="⬇ Get .exe", style="App.TButton",
                                        command=self._start_exe_download)
-        self.download_btn.grid(row=0, column=2, rowspan=2, sticky="e", padx=(6, 0))
+        self.download_btn.grid(row=0, column=2)
         # Not gridded here: it only appears when a newer version is found,
         # and clicking it asks before downloading or installing anything.
-        self.update_btn = ttk.Button(header, text="⬇ Update available", style="App.TButton",
+        self.update_btn = ttk.Button(buttons, text="⬇ Update available", style="App.TButton",
                                      command=self._start_exe_download)
+        attach_tooltip(self.guide_btn, "Open the guide: what every control in this window does (F1).")
+        attach_tooltip(self.settings_btn, "Palettes, custom colours, always-on-top and updates.")
+        attach_tooltip(self.download_btn, "Download the newest published AutoTyper.exe from GitHub.")
 
-        body = ttk.Frame(self, style="App.TFrame", padding=(24, 8, 24, 8))
+        body = tk.Frame(self, bg=c["background"], padx=24, pady=4)
         body.pack(fill="both", expand=True)
-        body.columnconfigure(0, weight=1)
-        body.rowconfigure(0, weight=0)
-        body.rowconfigure(1, weight=1)
+        self._binder.register(body, "background", window="main")
 
-        cfg = ttk.LabelFrame(body, text=" Typing settings ", style="App.TLabelframe", padding=14)
-        cfg.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        cfg.columnconfigure(0, weight=1)
-
-        ttk.Label(cfg, text="Target speed (WPM)", style="App.TLabel").grid(row=0, column=0, sticky="w")
+        # ---- typing speed ---------------------------------------------
+        speed = self._card(body, "Typing speed",
+                           "What AutoTyper aims for, and how human it stays.")
+        speed.columnconfigure(1, weight=1)
         self.wpm_var = tk.IntVar(value=110)
-        self.wpm_entry = ttk.Entry(cfg, textvariable=self.wpm_var, width=9,
+        self.wpm_entry = ttk.Entry(speed, textvariable=self.wpm_var, width=8,
                                    justify="right", style="App.TEntry")
-        self.wpm_entry.grid(row=0, column=1, sticky="e")
+        self._row(speed, 0, "Target speed (WPM)", self.wpm_entry,
+                  tip="20–150 words per minute — the average pace of the whole trace.")
         self.wpm_entry.bind("<FocusOut>", lambda event: self._normalise_entry(self.wpm_var, 20, 150, 0))
         self.wpm_entry.bind("<Return>", lambda event: self._normalise_entry(self.wpm_var, 20, 150, 0))
         self.wpm_scale = tk.Scale(
-            cfg, from_=20, to=150, orient="horizontal", variable=self.wpm_var,
-            resolution=1, showvalue=False, length=250, highlightthickness=0, bd=0,
-        )
-        self.wpm_scale.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+            speed, from_=20, to=150, orient="horizontal", variable=self.wpm_var,
+            resolution=1, showvalue=False, highlightthickness=0, bd=0)
+        self.wpm_scale.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 9))
+        self._binder.register(self.wpm_scale, "scale", window="main")
 
-        ttk.Label(cfg, text="Base typo rate (%)", style="App.TLabel").grid(row=2, column=0, sticky="w")
         self.typo_var = tk.DoubleVar(value=0.01)
-        self.typo_entry = ttk.Entry(cfg, textvariable=self.typo_var, width=9,
+        self.typo_entry = ttk.Entry(speed, textvariable=self.typo_var, width=8,
                                     justify="right", style="App.TEntry")
-        self.typo_entry.grid(row=2, column=1, sticky="e")
+        self._row(speed, 2, "Base typo rate (%)", self.typo_entry,
+                  tip="Chance per keystroke of a natural error episode and its correction.")
         self.typo_entry.bind("<FocusOut>", lambda event: self._normalise_entry(self.typo_var, 0.01, 100.0, 2))
         self.typo_entry.bind("<Return>", lambda event: self._normalise_entry(self.typo_var, 0.01, 100.0, 2))
         self.typo_scale = tk.Scale(
-            cfg, from_=0.01, to=100.0, orient="horizontal", variable=self.typo_var,
-            resolution=0.01, showvalue=False, length=250, highlightthickness=0, bd=0,
-        )
-        self.typo_scale.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+            speed, from_=0.01, to=100.0, orient="horizontal", variable=self.typo_var,
+            resolution=0.01, showvalue=False, highlightthickness=0, bd=0)
+        self.typo_scale.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 9))
+        self._binder.register(self.typo_scale, "scale", window="main")
 
         self.mode_var = tk.StringVar(value="Net (incl. pauses & fixes)")
-        ttk.Label(cfg, text="Speed definition", style="App.TLabel").grid(row=4, column=0, sticky="w", pady=4)
         self.mode_combo = ttk.Combobox(
-            cfg, textvariable=self.mode_var, values=list(MODE_LABELS), state="readonly", width=26,
-            style="App.TCombobox", postcommand=self._style_combobox_dropdowns,
-        )
-        self.mode_combo.grid(row=4, column=1, sticky="e", pady=4)
+            speed, textvariable=self.mode_var, values=list(MODE_LABELS), state="readonly",
+            width=28, style="App.TCombobox", postcommand=self._style_combobox_dropdowns)
+        self._row(speed, 4, "Speed definition", self.mode_combo,
+                  tip="Net counts pauses and corrections; Gross counts raw keystrokes.")
         self._comboboxes.append(self.mode_combo)
 
         self.delay_var = tk.IntVar(value=4)
-        ttk.Label(cfg, text="Countdown (seconds)", style="App.TLabel").grid(row=5, column=0, sticky="w", pady=4)
-        ttk.Spinbox(cfg, textvariable=self.delay_var, from_=1, to=30, width=8,
-                    style="App.TSpinbox").grid(row=5, column=1, sticky="e", pady=4)
+        self.delay_spin = ttk.Spinbox(speed, textvariable=self.delay_var, from_=1, to=30,
+                                      width=8, style="App.TSpinbox")
+        self._row(speed, 5, "Countdown (seconds)", self.delay_spin,
+                  tip="Grace period to click the window you want typed into (1–30s).")
+
+        # ---- editor behaviour -----------------------------------------
+        editor = self._card(body, "Editor behaviour",
+                            "How the text lands in the window you are typing into.")
+        editor.columnconfigure(1, weight=1)
 
         self.indent_mode_var = tk.StringVar(value="Off (type text as-is)")
-        ttk.Label(cfg, text="Editor indentation", style="App.TLabel").grid(row=6, column=0, sticky="w", pady=4)
         self.indent_combo = ttk.Combobox(
-            cfg, textvariable=self.indent_mode_var, values=list(INDENT_LABELS), state="readonly", width=26,
-            style="App.TCombobox", postcommand=self._style_combobox_dropdowns,
-        )
-        self.indent_combo.grid(row=6, column=1, sticky="e", pady=4)
+            editor, textvariable=self.indent_mode_var, values=list(INDENT_LABELS),
+            state="readonly", width=28, style="App.TCombobox",
+            postcommand=self._style_combobox_dropdowns)
+        self._row(editor, 0, "Editor indentation", self.indent_combo,
+                  tip="Predict and clear the indentation the target editor inserts by itself.")
         self._comboboxes.append(self.indent_combo)
 
         self.indent_var = tk.IntVar(value=4)
-        ttk.Label(cfg, text="Fixed indent width", style="App.TLabel").grid(row=7, column=0, sticky="w", pady=4)
-        ttk.Spinbox(cfg, textvariable=self.indent_var, from_=0, to=16, width=8,
-                    style="App.TSpinbox").grid(row=7, column=1, sticky="e", pady=4)
+        self.indent_spin = ttk.Spinbox(editor, textvariable=self.indent_var, from_=0, to=16,
+                                       width=8, style="App.TSpinbox")
+        self._row(editor, 1, "Fixed indent width", self.indent_spin,
+                  tip="Spaces per indent level; used by the Fixed width policy only.")
 
         self.coding_mode_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(cfg, text="Pascal coding mode (begin/end navigation)", variable=self.coding_mode_var,
-                        style="App.TCheckbutton").grid(row=8, column=0, columnspan=2, sticky="w", pady=(12, 3))
+        self._check_row(editor, 2, "Pascal coding mode (begin/end navigation)",
+                        self.coding_mode_var,
+                        tip="Lay down begin … end first, then fill the body in order.")
         self.verify_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(cfg, text="Verify and repair target editor", variable=self.verify_var,
-                        style="App.TCheckbutton").grid(row=9, column=0, columnspan=2, sticky="w", pady=3)
+        self._check_row(editor, 3, "Verify and repair target editor", self.verify_var,
+                        tip="Read the finished text back and repair it if it differs.")
         self.det_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(cfg, text="Deterministic seed", variable=self.det_var,
-                        style="App.TCheckbutton").grid(row=10, column=0, sticky="w", pady=3)
+        seed_check = ttk.Checkbutton(editor, text="Deterministic seed", variable=self.det_var,
+                                     style="App.TCheckbutton")
+        seed_check.grid(row=4, column=0, sticky="w", pady=3)
+        attach_tooltip(seed_check, "Reuse the same seed to repeat a run exactly.")
         self.seed_var = tk.IntVar(value=12345)
-        ttk.Spinbox(cfg, textvariable=self.seed_var, from_=0, to=2**31 - 1, width=9,
-                    style="App.TSpinbox").grid(row=10, column=1, sticky="e", pady=3)
+        self.seed_entry = ttk.Spinbox(editor, textvariable=self.seed_var, from_=0,
+                                      to=2**31 - 1, width=9, style="App.TSpinbox")
+        self.seed_entry.grid(row=4, column=1, sticky="e", pady=3)
 
-        items = ttk.LabelFrame(body, text=" Source code / text input ", style="App.TLabelframe", padding=12)
-        items.grid(row=1, column=0, sticky="nsew")
-        items.rowconfigure(1, weight=1)
-        items.columnconfigure(0, weight=1)
-        tools = ttk.Frame(items, style="App.TFrame")
-        tools.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        ttk.Button(tools, text="Clear", style="App.TButton", command=self._clear_text).pack(side="left", padx=(0, 6))
-        ttk.Button(tools, text="Paste clipboard", style="App.TButton", command=self._paste_clipboard).pack(side="left", padx=(0, 6))
-        ttk.Button(tools, text="Benchmark", style="App.TButton", command=self._benchmark).pack(side="left")
+        # ---- source text ----------------------------------------------
+        text_card = self._card(body, "Text to type",
+                               "Paste the source, then press Start AutoTyper.",
+                               expand=True)
+        toolbar = tk.Frame(text_card, bg=c["background"])
+        toolbar.pack(fill="x", pady=(0, 8))
+        self._binder.register(toolbar, "background", window="main")
+        paste_btn = ttk.Button(toolbar, text="Paste clipboard", style="App.TButton",
+                               command=self._paste_clipboard)
+        paste_btn.pack(side="left", padx=(0, 6))
+        clear_btn = ttk.Button(toolbar, text="Clear", style="App.TButton",
+                               command=self._clear_text)
+        clear_btn.pack(side="left", padx=(0, 6))
+        bench_btn = ttk.Button(toolbar, text="Benchmark", style="App.TButton",
+                               command=self._benchmark)
+        bench_btn.pack(side="left")
+        attach_tooltip(paste_btn, "Replace the text with the contents of the clipboard.")
+        attach_tooltip(clear_btn, "Empty the text box.")
+        attach_tooltip(bench_btn, "Simulate the trace and report the statistics "
+                                  "without pressing a single key.")
+        self.count_label = tk.Label(toolbar, textvariable=self.count_var,
+                                    bg=c["background"], fg=c["muted"],
+                                    font=("Segoe UI", 9))
+        self.count_label.pack(side="right")
+        self._binder.register(self.count_label, "muted", window="main")
 
-        box = ttk.Frame(items, style="App.TFrame")
-        box.grid(row=1, column=0, sticky="nsew")
+        box = tk.Frame(text_card, bg=c["background"])
+        box.pack(fill="both", expand=True)
+        self._binder.register(box, "background", window="main")
         box.rowconfigure(0, weight=1)
         box.columnconfigure(0, weight=1)
-        self.text_box = tk.Text(box, height=10, font=("Consolas", 11), wrap="none", undo=True,
+        self.text_box = tk.Text(box, height=8, font=("Consolas", 11), wrap="none", undo=True,
                                 relief="flat", padx=10, pady=10)
         sy = ttk.Scrollbar(box, orient="vertical", command=self.text_box.yview)
         sx = ttk.Scrollbar(box, orient="horizontal", command=self.text_box.xview)
@@ -3366,25 +5050,46 @@ class AutoTyperApp(_TkBase):
         sx.grid(row=1, column=0, sticky="ew")
         self.text_box.bind("<Control-a>", self._select_all_text)
         self.text_box.bind("<Control-A>", self._select_all_text)
+        self.text_box.bind("<KeyRelease>", lambda event: self._update_count_label())
+        self.text_box.bind("<<Paste>>", lambda event: self.after(10, self._update_count_label))
+        attach_tooltip(self.text_box, "The text that will be typed. Blank lines and "
+                                      "indentation are preserved; lines scroll sideways.")
 
-        footer = ttk.Frame(self, style="App.TFrame", padding=(24, 4, 24, 18))
-        footer.pack(fill="x")
-        footer.columnconfigure(0, weight=1)
-        self.status_label = ttk.Label(footer, text="Status: Ready", style="App.TLabel", font=("Segoe UI", 10, "bold"))
-        self.status_label.grid(row=0, column=0, sticky="w")
-        self.progress = ttk.Progressbar(footer, mode="determinate", style="App.Horizontal.TProgressbar")
-        self.progress.grid(row=1, column=0, sticky="ew", pady=(7, 10))
-        buttons = ttk.Frame(footer, style="App.TFrame")
-        buttons.grid(row=2, column=0, sticky="ew")
-        buttons.columnconfigure(0, weight=1)
-        buttons.columnconfigure(1, weight=1)
-        self.start_btn = ttk.Button(buttons, text="Start AutoTyper", style="Accent.TButton", command=self.start_process)
+        # ---- footer ---------------------------------------------------
+        footer = tk.Frame(self, bg=c["background"], padx=24, pady=(6, 16))
+        footer.pack(fill="x", side="bottom")
+        self._binder.register(footer, "background", window="main")
+        self.status_label = tk.Label(footer, text="Status: Ready", bg=c["background"],
+                                     fg=c["foreground"], font=("Segoe UI", 10, "bold"))
+        self.status_label.pack(anchor="w")
+        self._binder.register(self.status_label, "body", window="main")
+        self.progress = ttk.Progressbar(footer, mode="determinate",
+                                        style="App.Horizontal.TProgressbar")
+        self.progress.pack(fill="x", pady=(7, 10))
+
+        run_row = tk.Frame(footer, bg=c["background"])
+        run_row.pack(fill="x")
+        self._binder.register(run_row, "background", window="main")
+        run_row.columnconfigure(0, weight=1)
+        run_row.columnconfigure(1, weight=1)
+        self.start_btn = ttk.Button(run_row, text="Start AutoTyper", style="Accent.TButton",
+                                    command=self.start_process)
         self.start_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        self.stop_btn = ttk.Button(buttons, text="Stop", style="Stop.TButton", command=self.stop_process, state="disabled")
+        self.stop_btn = ttk.Button(run_row, text="Stop", style="Stop.TButton",
+                                   command=self.stop_process, state="disabled")
         self.stop_btn.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        attach_tooltip(self.start_btn, "Plan the trace, count down, then type (Ctrl+Enter).")
+        attach_tooltip(self.stop_btn, "Stop at the next keystroke boundary (Esc).")
+        hint = tk.Label(footer,
+                        text="Ctrl+Enter starts · Esc stops · F1 opens the guide · "
+                             "AutoTyper types into whichever window has focus",
+                        bg=c["background"], fg=c["muted"], font=("Segoe UI", 8))
+        hint.pack(anchor="w", pady=(8, 0))
+        self._binder.register(hint, "muted", window="main")
 
         self._normalise_entry(self.wpm_var, 20, 150, 0)
         self._normalise_entry(self.typo_var, 0.01, 100.0, 2)
+        self._update_count_label()
 
     @staticmethod
     def _normalise_entry(variable, minimum: float, maximum: float, decimals: int):
@@ -3397,6 +5102,7 @@ class AutoTyperApp(_TkBase):
 
     def _clear_text(self):
         self.text_box.delete("1.0", tk.END)
+        self._update_count_label()
 
     def _paste_clipboard(self):
         try:
@@ -3406,6 +5112,28 @@ class AutoTyperApp(_TkBase):
             return
         self.text_box.delete("1.0", tk.END)
         self.text_box.insert("1.0", content)
+        self._update_count_label()
+
+    def _text_contents(self) -> str:
+        try:
+            return self.text_box.get("1.0", "end-1c")
+        except tk.TclError:
+            return ""
+
+    def _update_count_label(self):
+        """Keep the character/line counter next to the toolbar accurate."""
+        text = self._text_contents()
+        lines = text.count("\n") + 1 if text else 0
+        if not text:
+            summary = "Empty — paste some text to begin"
+        else:
+            characters = "character" if len(text) == 1 else "characters"
+            line_word = "line" if lines == 1 else "lines"
+            summary = f"{len(text):,} {characters} · {lines:,} {line_word}"
+        try:
+            self.count_var.set(summary)
+        except tk.TclError:
+            pass
 
     def _select_all_text(self, event=None):
         self.text_box.tag_add("sel", "1.0", "end")
@@ -3508,7 +5236,11 @@ class AutoTyperApp(_TkBase):
     def _on_close(self):
         self.stop_event.set()
         self._close_settings()
-        self.after_cancel(self._poll_id)
+        self._close_guide()
+        try:
+            self.after_cancel(self._poll_id)
+        except tk.TclError:
+            pass
         self.destroy()
 
     def _worker(self, text: str, config: RunConfig):
@@ -3595,7 +5327,7 @@ class AutoTyperApp(_TkBase):
         )
         try:
             self.update_btn.config(text=f"⬇ Get v{latest} .exe")
-            self.update_btn.grid(row=0, column=3, rowspan=2, sticky="e", padx=(6, 0))
+            self.update_btn.grid(row=0, column=3, sticky="e", padx=(6, 0))
         except tk.TclError:
             pass
         has_exe = release.exe_asset is not None

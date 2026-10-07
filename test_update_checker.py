@@ -123,8 +123,8 @@ class IsNewerVersionTests(unittest.TestCase):
 
 
 class AppVersionTests(unittest.TestCase):
-    def test_shipped_version_is_1_0_0(self):
-        self.assertEqual(at.APP_VERSION, "1.0.0")
+    def test_shipped_version_is_1_1_0(self):
+        self.assertEqual(at.APP_VERSION, "1.1.0")
 
     def test_points_at_this_repository(self):
         self.assertEqual(at.GITHUB_REPO, "jkjklol308-alt/AutoTyper")
@@ -686,7 +686,7 @@ class GuiUpdateAnnouncementTests(unittest.TestCase):
         self.messagebox.askyesno = lambda *args, **kwargs: False
         types.MethodType(self.mod.AutoTyperApp._on_update_available, self.app)(self._release())
         self.assertEqual(self.app.status_label.kw["text"],
-                         "Status: Update available — v1.3.0 (you have v1.0.0)")
+                         "Status: Update available — v1.3.0 (you have v1.1.0)")
         self.assertIn("1.3.0", self.app.update_btn.kw["text"])
         self.assertIn("exe", self.app.update_btn.kw["text"].lower())
 
