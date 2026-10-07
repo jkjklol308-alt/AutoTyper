@@ -123,8 +123,8 @@ class IsNewerVersionTests(unittest.TestCase):
 
 
 class AppVersionTests(unittest.TestCase):
-    def test_shipped_version_is_1_1_0(self):
-        self.assertEqual(at.APP_VERSION, "1.1.0")
+    def test_shipped_version_is_1_1_1(self):
+        self.assertEqual(at.APP_VERSION, "1.1.1")
 
     def test_points_at_this_repository(self):
         self.assertEqual(at.GITHUB_REPO, "jkjklol308-alt/AutoTyper")
@@ -701,7 +701,7 @@ class GuiUpdateAnnouncementTests(unittest.TestCase):
         self.messagebox.askyesno = lambda *args, **kwargs: False
         types.MethodType(self.mod.AutoTyperApp._on_update_available, self.app)(self._release())
         self.assertEqual(self.app.status_label.kw["text"],
-                         "Status: Update available — v1.3.0 (you have v1.1.0)")
+                         "Status: Update available — v1.3.0 (you have v1.1.1)")
         # The offer now lives in Settings: the download button is relabelled
         # with the version it will fetch and the hint names it too.
         self.assertEqual(self.app._available_version, "1.3.0")

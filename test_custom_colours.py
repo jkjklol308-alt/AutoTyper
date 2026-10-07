@@ -27,8 +27,8 @@ MODULE_PATH = Path(__file__).resolve().parent / "auto_typer.py"
 # Pure model
 # ---------------------------------------------------------------------------
 class VersionTests(unittest.TestCase):
-    def test_version_is_1_1_0(self):
-        self.assertEqual(v2.APP_VERSION, "1.1.0")
+    def test_version_is_1_1_1(self):
+        self.assertEqual(v2.APP_VERSION, "1.1.1")
 
     def test_warm_terracotta_removed_and_order_shifted(self):
         names = list(v2.PALETTE_DEFINITIONS)
@@ -88,62 +88,70 @@ class HexToHsvTests(unittest.TestCase):
 
 
 class GradientModelTests(unittest.TestCase):
-    """The pure model behind the Paint-style gradient square + hue strip."""
+    """The pure model behind the Paint-style colour field + shade strip."""
 
-    def test_point_to_sv_maps_corners_like_paint(self):
+    def test_point_to_hs_maps_corners_like_paint(self):
         w, h = v2.GRADIENT_WIDTH, v2.GRADIENT_HEIGHT
-        self.assertEqual(v2.point_to_sv(0, 0, w, h), (0.0, 1.0))        # white
-        self.assertEqual(v2.point_to_sv(w - 1, 0, w, h), (1.0, 1.0))    # pure hue
-        self.assertEqual(v2.point_to_sv(0, h - 1, w, h), (0.0, 0.0))    # black
-        self.assertEqual(v2.point_to_sv(w - 1, h - 1, w, h), (1.0, 0.0))
+        self.assertEqual(v2.point_to_hs(0, 0, w, h), (0.0, 1.0))        # pure red
+        self.assertEqual(v2.point_to_hs(w - 1, 0, w, h), (1.0, 1.0))    # rainbow wraps
+        self.assertEqual(v2.point_to_hs(0, h - 1, w, h), (0.0, 0.0))    # greyscale
+        self.assertEqual(v2.point_to_hs(w - 1, h - 1, w, h), (1.0, 0.0))
 
-    def test_point_to_sv_clamps_outside_the_square(self):
+    def test_point_to_hs_clamps_outside_the_square(self):
         w, h = v2.GRADIENT_WIDTH, v2.GRADIENT_HEIGHT
-        self.assertEqual(v2.point_to_sv(-50, -50, w, h), (0.0, 1.0))
-        self.assertEqual(v2.point_to_sv(w + 50, h + 50, w, h), (1.0, 0.0))
+        self.assertEqual(v2.point_to_hs(-50, -50, w, h), (0.0, 1.0))
+        self.assertEqual(v2.point_to_hs(w + 50, h + 50, w, h), (1.0, 0.0))
 
-    def test_sv_to_point_is_the_inverse(self):
+    def test_hs_to_point_is_the_inverse(self):
         w, h = 11, 9
         for x in range(w):
             for y in range(h):
-                px, py = v2.sv_to_point(*v2.point_to_sv(x, y, w, h), width=w, height=h)
+                px, py = v2.hs_to_point(*v2.point_to_hs(x, y, w, h), width=w, height=h)
                 self.assertAlmostEqual(px, x)
                 self.assertAlmostEqual(py, y)
 
-    def test_hue_at_and_hue_to_y_are_inverses(self):
+    def test_value_at_and_value_to_y_are_inverses(self):
         for y in range(v2.GRADIENT_HEIGHT):
-            self.assertAlmostEqual(v2.hue_to_y(v2.hue_at(y), v2.GRADIENT_HEIGHT), y)
-        self.assertEqual(v2.hue_at(-10), 0.0)
-        self.assertEqual(v2.hue_at(10_000), 1.0)
+            self.assertAlmostEqual(v2.value_to_y(v2.value_at(y), v2.GRADIENT_HEIGHT), y)
+        self.assertEqual(v2.value_at(-10), 1.0)          # light end
+        self.assertEqual(v2.value_at(10_000), 0.0)       # dark end
 
-    def test_gradient_corners_are_white_hue_and_black(self):
+    def test_field_corners_are_red_white_and_black(self):
         w, h = v2.GRADIENT_WIDTH, v2.GRADIENT_HEIGHT
-        self.assertEqual(v2.gradient_square_colour(0.0, 0, 0, w, h), "#FFFFFF")
-        self.assertEqual(v2.gradient_square_colour(0.0, w - 1, 0, w, h), "#FF0000")
-        self.assertEqual(v2.gradient_square_colour(0.0, 0, h - 1, w, h), "#000000")
-        self.assertEqual(v2.gradient_square_colour(0.0, w - 1, h - 1, w, h), "#000000")
-        self.assertEqual(v2.gradient_square_colour(1.0 / 3.0, w - 1, 0, w, h), "#00FF00")
+        self.assertEqual(v2.gradient_square_colour(0, 0, 1.0, w, h), "#FF0000")
+        self.assertEqual(v2.gradient_square_colour(w - 1, 0, 1.0, w, h), "#FF0000")
+        self.assertEqual(v2.gradient_square_colour(0, h - 1, 1.0, w, h), "#FFFFFF")
+        self.assertEqual(v2.gradient_square_colour(0, h - 1, 0.5, w, h), "#808080")
+        self.assertEqual(v2.gradient_square_colour(123, 45, 0.0, w, h), "#000000")
 
-    def test_left_edge_of_the_square_is_greyscale(self):
-        for y in (0, 40, 80, 120, v2.GRADIENT_HEIGHT - 1):
-            colour = v2.gradient_square_colour(0.35, 0, y)
-            r, g, b = (int(colour[i:i + 2], 16) for i in (1, 3, 5))
-            self.assertEqual(r, g)
-            self.assertEqual(g, b)
+    def test_top_row_of_the_field_is_the_rainbow(self):
+        w, h = 7, 3
+        rows = v2.gradient_square_rows(1.0, w, h)
+        top = rows[0][1:-1].split(" ")
+        self.assertEqual(top, ["#FF0000", "#FFFF00", "#00FF00", "#00FFFF",
+                               "#0000FF", "#FF00FF", "#FF0000"])
+
+    def test_bottom_edge_of_the_square_is_greyscale(self):
+        for value in (1.0, 0.6, 0.2):
+            for x in (0, 60, 120, v2.GRADIENT_WIDTH - 1):
+                colour = v2.gradient_square_colour(x, v2.GRADIENT_HEIGHT - 1, value)
+                r, g, b = (int(colour[i:i + 2], 16) for i in (1, 3, 5))
+                self.assertEqual(r, g)
+                self.assertEqual(g, b)
 
     def test_square_rows_match_the_per_pixel_function_exactly(self):
-        # Dyadic sizes and hues keep every float operation exact, so the
-        # fast row builder must agree with gradient_square_colour bit for bit.
+        # Dyadic sizes, hues and values keep every float operation exact, so
+        # the fast row builder must agree with gradient_square_colour bit for bit.
         w, h = 9, 5
-        for hue in (0.0, 0.25, 1.0 / 3.0, 0.5, 0.75, 5.0 / 6.0):
-            rows = v2.gradient_square_rows(hue, w, h)
+        for value in (1.0, 0.75, 0.5, 0.25, 0.0):
+            rows = v2.gradient_square_rows(value, w, h)
             self.assertEqual(len(rows), h)
             for y, row in enumerate(rows):
                 cells = row[1:-1].split(" ")
                 self.assertEqual(len(cells), w)
                 for x, cell in enumerate(cells):
-                    self.assertEqual(cell, v2.gradient_square_colour(hue, x, y, w, h),
-                                     f"hue={hue} x={x} y={y}")
+                    self.assertEqual(cell, v2.gradient_square_colour(x, y, value, w, h),
+                                     f"value={value} x={x} y={y}")
 
     def test_square_rows_are_valid_photo_image_data(self):
         rows = v2.gradient_square_rows(0.6, 16, 8)
@@ -157,26 +165,24 @@ class GradientModelTests(unittest.TestCase):
         self.assertEqual(len(rows), v2.GRADIENT_HEIGHT)
         self.assertEqual(len(rows[0][1:-1].split(" ")), v2.GRADIENT_WIDTH)
 
-    def test_hue_strip_runs_through_the_rainbow(self):
-        h = 7  # y/(h-1) hits 0, 1/6 ... 1 exactly
-        rows = v2.hue_strip_rows(4, h)
+    def test_shade_strip_runs_white_to_black(self):
+        h = 5
+        rows = v2.shade_strip_rows(4, h)
         self.assertEqual(len(rows), h)
         colours = [row[1:-1].split(" ") for row in rows]
         for row in colours:
-            self.assertEqual(len(set(row)), 1)          # each row is one hue
+            self.assertEqual(len(set(row)), 1)          # each row is one shade
             self.assertEqual(len(row), 4)
-        self.assertEqual(colours[0][0], "#FF0000")      # top: red
-        self.assertEqual(colours[1][0], "#FFFF00")      # yellow
-        self.assertEqual(colours[2][0], "#00FF00")      # green
-        self.assertEqual(colours[3][0], "#00FFFF")      # cyan
-        self.assertEqual(colours[4][0], "#0000FF")      # blue
-        self.assertEqual(colours[5][0], "#FF00FF")      # magenta
-        self.assertEqual(colours[6][0], "#FF0000")      # bottom wraps to red
+        self.assertEqual(colours[0][0], "#FFFFFF")
+        self.assertEqual(colours[1][0], "#BFBFBF")
+        self.assertEqual(colours[2][0], "#808080")
+        self.assertEqual(colours[3][0], "#404040")
+        self.assertEqual(colours[4][0], "#000000")
 
-    def test_hue_strip_colour_matches_the_rows(self):
+    def test_shade_strip_colour_matches_the_rows(self):
         for y in (0, 13, 79, v2.GRADIENT_HEIGHT - 1):
-            row = v2.hue_strip_rows(v2.HUE_STRIP_WIDTH, v2.GRADIENT_HEIGHT)[y]
-            self.assertEqual(row[1:-1].split(" ")[0], v2.hue_strip_colour(y))
+            row = v2.shade_strip_rows(v2.HUE_STRIP_WIDTH, v2.GRADIENT_HEIGHT)[y]
+            self.assertEqual(row[1:-1].split(" ")[0], v2.shade_strip_colour(y))
 
 
 class CustomPaletteStorageTests(unittest.TestCase):
@@ -565,27 +571,27 @@ class WidgetTests(unittest.TestCase):
         kwargs.setdefault("hue_width", 3)
         return self.mod.ColourGradientPicker(self.root, **kwargs)
 
-    def test_picker_paints_the_gradient_and_the_rainbow(self):
+    def test_picker_paints_the_colour_field_and_the_shade_strip(self):
         picker = self._picker()
-        expected_square = "{" + " ".join(self.mod.gradient_square_rows(0.0, 11, 11)) + "}"
-        expected_strip = "{" + " ".join(self.mod.hue_strip_rows(3, 11)) + "}"
+        expected_square = "{" + " ".join(self.mod.gradient_square_rows(1.0, 11, 11)) + "}"
+        expected_strip = "{" + " ".join(self.mod.shade_strip_rows(3, 11)) + "}"
         self.assertEqual(picker._square_image.puts, [expected_square])
-        self.assertEqual(picker._hue_image.puts, [expected_strip])
+        self.assertEqual(picker._strip_image.puts, [expected_strip])
 
-    def test_clicking_the_square_reports_the_shade_under_the_pointer(self):
+    def test_clicking_the_square_reports_the_colour_under_the_pointer(self):
         picked = []
         picker = self._picker(on_pick=picked.append)
         sx0, sy0, sx1, sy1 = picker.square_box
-        picker.canvas.press(sx0, sy0)                # top-left: white
-        self.assertEqual(picked[-1], "#FFFFFF")
-        picker.canvas.press(sx1, sy0)                # top-right: pure hue (red)
+        picker.canvas.press(sx0, sy0)                # top-left: pure red
         self.assertEqual(picked[-1], "#FF0000")
-        picker.canvas.press(sx0 + 5, sy0 + 5)        # middle: half shade
+        picker.canvas.press(sx1, sy0)                # top-right: rainbow wraps
+        self.assertEqual(picked[-1], "#FF0000")
+        picker.canvas.press(sx0 + 5, sy0 + 5)        # middle: half saturated
         self.assertEqual(picked[-1],
-                         self.mod.gradient_square_colour(0.0, 5, 5, 11, 11))
-        picker.canvas.press(sx0, sy1)                # bottom-left: black
-        self.assertEqual(picked[-1], "#000000")
-        self.assertEqual(picker.selected_colour, "#000000")
+                         self.mod.gradient_square_colour(5, 5, 1.0, 11, 11))
+        picker.canvas.press(sx0, sy1)                # bottom: greyscale at v=1
+        self.assertEqual(picked[-1], "#FFFFFF")
+        self.assertEqual(picker.selected_colour, "#FFFFFF")
 
     def test_dragging_inside_the_square_streams_colours(self):
         picked = []
@@ -596,20 +602,21 @@ class WidgetTests(unittest.TestCase):
         self.assertEqual(len(picked), 2)
         self.assertEqual(picked[-1], picker.selected_colour)
 
-    def test_dragging_the_hue_strip_repaints_the_square(self):
+    def test_dragging_the_shade_strip_darkens_the_whole_field(self):
         picked = []
         picker = self._picker(width=11, height=13, on_pick=picked.append)
         hx0, hy0 = picker.hue_box[0], picker.hue_box[1]
         renders_before = len(picker._square_image.puts)
-        picker.canvas.press(hx0 + 1, hy0 + 4)        # hue = 4/12 = green
-        self.assertEqual(picked[-1], "#00FF00")      # square kept s=1, v=1
+        picker.canvas.press(hx0 + 1, hy0 + 4)        # value = 1 - 4/12
+        shade = self.mod.value_at(4, 13)
+        self.assertEqual(picked[-1], "#AA0000")      # hue/sat kept, darker red
         self.assertEqual(len(picker._square_image.puts), renders_before + 1)
-        expected = "{" + " ".join(self.mod.gradient_square_rows(1 / 3, 11, 13)) + "}"
+        expected = "{" + " ".join(self.mod.gradient_square_rows(shade, 11, 13)) + "}"
         self.assertEqual(picker._square_image.puts[-1], expected)
-        # ...and the square's top-right corner is now pure green.
-        sx0, sy0, sx1, _ = picker.square_box
-        picker.canvas.press(sx1, sy0)
-        self.assertEqual(picked[-1], "#00FF00")
+        # ...and the field's top-left corner now reports the darker red too.
+        sx0, sy0 = picker.square_box[0], picker.square_box[1]
+        picker.canvas.press(sx0, sy0)
+        self.assertEqual(picked[-1], "#AA0000")
 
     def test_clicks_in_the_margin_are_ignored(self):
         picked = []
@@ -627,13 +634,14 @@ class WidgetTests(unittest.TestCase):
         hue, saturation, value = picker.hsv
         self.assertAlmostEqual(hue, 1 / 3)
         self.assertEqual((saturation, value), (1.0, 1.0))
-        sx0, sy0, sx1, _ = picker.square_box
+        sx0, sy0 = picker.square_box[0], picker.square_box[1]
         coords = picker.canvas.items[picker._shade_marker_outer]["coords"]
-        self.assertAlmostEqual(coords[0], sx1 - picker.MARKER_R)
-        self.assertAlmostEqual(coords[1], sy0 - picker.MARKER_R)
-        hue_coords = picker.canvas.items[picker._hue_marker_outer]["coords"]
-        self.assertAlmostEqual((hue_coords[1] + hue_coords[3]) / 2,
-                               sy0 + self.mod.hue_to_y(1 / 3, 11))
+        mx, my = self.mod.hs_to_point(1 / 3, 1.0, 11, 11)
+        self.assertAlmostEqual(coords[0], sx0 + mx - picker.MARKER_R)
+        self.assertAlmostEqual(coords[1], sy0 + my - picker.MARKER_R)
+        strip_coords = picker.canvas.items[picker._hue_marker_outer]["coords"]
+        self.assertAlmostEqual((strip_coords[1] + strip_coords[3]) / 2,
+                               sy0 + self.mod.value_to_y(1.0, 11))
 
     def test_set_selected_echoes_the_exact_colour(self):
         picker = self._picker()
@@ -644,14 +652,14 @@ class WidgetTests(unittest.TestCase):
         picker.set_selected(None)
         self.assertIsNone(picker.selected_colour)
 
-    def test_greys_keep_the_hue_the_square_already_shows(self):
-        picker = self._picker(width=11, height=13)
-        hx0, hy0 = picker.hue_box[0], picker.hue_box[1]
-        picker.canvas.press(hx0 + 1, hy0 + 4)        # green square
+    def test_greys_keep_the_field_position_already_shown(self):
+        picker = self._picker()
+        sx0, sy0 = picker.square_box[0], picker.square_box[1]
+        picker.canvas.press(sx0 + 5, sy0 + 5)        # cyan-ish, half saturated
         picker.set_selected("#808080")
         self.assertEqual(picker.selected_colour, "#808080")
-        self.assertEqual(picker.hsv[1], 0.0)
-        self.assertAlmostEqual(picker.hsv[0], 1 / 3)
+        self.assertAlmostEqual(picker.hsv[0], 0.5)   # field keeps its place
+        self.assertAlmostEqual(picker.hsv[1], 0.5)
 
     # -- editor ---------------------------------------------------------
     def _editor(self, **kwargs):
