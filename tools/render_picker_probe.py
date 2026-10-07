@@ -231,15 +231,23 @@ def screenshot(window, destination: Path) -> str:
     return "unavailable"
 
 
-def image_from_pixels(pixels, width, height):
-    """Rebuild a picture from the pixels Tk reported holding."""
+def image_from_pixels(pixels, width, height, step: int = 1):
+    """Rebuild a picture from the pixels Tk reported holding.
+
+    Sampled coordinates are folded onto ``step`` so the picture comes out at
+    the sampled size: Pillow's ``resize`` has been seen returning a blank image
+    for these (Pillow 12.3.0 samples the box centre with ``NEAREST``), and a
+    blank thumbnail would hide exactly what this probe exists to show.
+    """
     from PIL import Image
-    image = Image.new("RGB", (width, height), (255, 255, 255))
+    step = max(1, int(step))
+    image = Image.new("RGB", (-(-width // step), -(-height // step)), (255, 255, 255))
     for key, colour in pixels.items():
         x, y = (int(part) for part in key.split(","))
         normalised = at.normalise_hex_colour(colour)
         if normalised is not None:
-            image.putpixel((x, y), tuple(int(normalised[i:i + 2], 16) for i in (1, 3, 5)))
+            image.putpixel((x // step, y // step),
+                           tuple(int(normalised[i:i + 2], 16) for i in (1, 3, 5)))
     return image
 
 
@@ -248,8 +256,7 @@ def thumbnail_base64(image, scale: int, colours: int = 32) -> str:
     from PIL import Image
     small = image.convert("RGB")
     if scale > 1:
-        small = small.resize((max(1, small.width // scale),
-                              max(1, small.height // scale)), Image.NEAREST)
+        small = small.reduce(scale)   # resize() can come back blank; reduce() averages
     small = small.convert("P", palette=Image.ADAPTIVE, colors=colours)
     buffer = io.BytesIO()
     small.save(buffer, format="PNG", optimize=True)
@@ -262,12 +269,12 @@ def collect_images(picker, out, images: dict) -> None:
         value = picker.field_shade
         grid = read_back_grid(picker._square_image, picker.width, picker.height)
         images["tk_stored_field_half"] = thumbnail_base64(
-            image_from_pixels(grid, picker.width, picker.height), 2)
+            image_from_pixels(grid, picker.width, picker.height, 2), 1)
         expected = {f"{x},{y}": at.gradient_square_colour(x, y, value)
                     for y in range(0, picker.height, 2)
                     for x in range(0, picker.width, 2)}
         images["model_field_half"] = thumbnail_base64(
-            image_from_pixels(expected, picker.width, picker.height), 2)
+            image_from_pixels(expected, picker.width, picker.height, 2), 1)
         shot = out / "picker.png"
         if shot.is_file():
             from PIL import Image
