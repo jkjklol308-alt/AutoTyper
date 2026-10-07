@@ -1,22 +1,23 @@
 name: Picker rendering probe
 
-# Diagnostic (manual only): the unit suite drives the picker through a tkinter
-# stub, so a mistake in the *real* Tk calls would never show up there. This job
-# opens the real editor on Windows and Linux, reads the pixels back out of the
-# PhotoImage Tk stored, and uploads a screenshot of the window.
+# Diagnostic: the unit suite drives the picker through a tkinter stub, so a
+# mistake in the *real* Tk calls would never show up there. This job opens the
+# real editor on Windows and Linux, reads the pixels back out of the PhotoImage
+# Tk stored, and uploads a screenshot of the window.
 #
 # It also checks the self-update restart on Windows: a freshly started onefile
 # build must survive inheriting a stale PyInstaller environment (the "Error
 # loading Python DLL" reported after updating), which is what the swap script
 # now prevents.
+#
+# It runs on the default branch (so a released state is verified on every
+# merge) or on demand. It deliberately does not run on every feature-branch
+# push: the probe takes minutes on two operating systems.
 on:
   workflow_dispatch:
   push:
-    paths:
-      - "tools/render_picker_probe.py"
-      - "auto_typer.py"
-      - "AutoTyper.spec"
-      - ".github/workflows/diagnostics.yml"
+    branches:
+      - main
 
 permissions:
   contents: read
