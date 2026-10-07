@@ -28,7 +28,23 @@ jobs:
           pip install pyinstaller pynput
 
       - name: Run the test suite
-        run: python -m unittest discover -v -p "test_*.py"
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m unittest discover -v -p "test_*.py" 2>&1 | tee tests.log
+
+      # The step summary is readable from the check-run API, which makes a
+      # failed run diagnosable without downloading the (Windows-only) logs.
+      - name: Summarise test failures
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "### Test suite output"
+            echo '```'
+            tail -n 150 tests.log 2>/dev/null || echo "no output captured"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Read the application version
         id: app

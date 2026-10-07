@@ -735,7 +735,7 @@ class GuiDownloadWorkerTests(unittest.TestCase):
             self.worker()
         # The reported path is whatever the (mocked) download produced...
         self.assertEqual(self.app.posts[-1], ("download_result", "self_update",
-                                              ("/tmp/AutoTyper.exe", "1.3.0")))
+                                              (str(Path("/tmp/AutoTyper.exe")), "1.3.0")))
         # ...and the file was staged in the temp folder, never written over the
         # running executable (Windows keeps that locked).
         staged = dl.call_args[0][1]
@@ -751,7 +751,7 @@ class GuiDownloadWorkerTests(unittest.TestCase):
             self.worker()
         kind, payload = self.app.posts[-1][1], self.app.posts[-1][2]
         self.assertEqual(kind, "download")
-        self.assertEqual(payload, ("/home/u/Downloads/AutoTyper.exe", "1.3.0"))
+        self.assertEqual(payload, (str(Path("/home/u/Downloads/AutoTyper.exe")), "1.3.0"))
 
     def test_release_without_exe_asks_for_the_page(self):
         with mock.patch.object(self.mod, "UpdateChecker") as checker:
