@@ -72,12 +72,7 @@ def main(sha, out_dir):
                     (out / f"{run_name}.{key}.png").write_bytes(base64.b64decode(blob))
                     print(f"wrote {out / f'{run_name}.{key}.png'}")
                 continue
-            report = payload.get("report", {})
-            print("report:", json.dumps(report.get("field_mismatches"), indent=2))
-            print("shade:", report.get("shade"), "tk:", report.get("tk"),
-                  "tcl:", report.get("tcl"), "screenshot:", report.get("screenshot"))
-            print("field_actual:", json.dumps(report.get("field_actual"), indent=2))
-            print("strip:", json.dumps(report.get("shade_strip_actual")))
+            print(json.dumps(payload, indent=2))
 
 
 if __name__ == "__main__":

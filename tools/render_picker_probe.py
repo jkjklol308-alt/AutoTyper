@@ -282,7 +282,6 @@ def main(argv=None):
             "field_mismatches": mismatches,
             "field_mismatch_count": len(mismatches),
             "shade_strip_actual": read_back(picker._strip_image, ((0, 0), (0, 159))),
-            "field_marker": picker.canvas.items.get(picker._shade_marker_outer),
         })
         # Re-run the exact call the widget makes so a silent failure shows up.
         try:
