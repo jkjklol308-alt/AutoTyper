@@ -29,9 +29,11 @@ A next-generation human typing simulator implementing:
      Python script. A packaged build swaps itself in and restarts
      automatically (keeping a .old backup); a build running from source saves
      the executable next to the user's other downloads.
- 10. Custom UI Colours: a Microsoft-Paint style hexagon ("honeycomb") colour
-     picker that lets you choose a primary, accent and background colour, name
-     the result and save it alongside the built-in palettes.
+ 10. Custom UI Colours (v1.1.0): a Microsoft-Paint style gradient colour
+     picker — a shade/saturation gradient square plus a rainbow hue strip —
+     that lets you click or drag to any colour, choose a primary, accent and
+     background colour, name the result and save it alongside the built-in
+     palettes.
 
 Usage:
     python auto_typer.py --benchmark --wpm 110 --mode net --coding-mode --file code.pas
@@ -70,7 +72,7 @@ try:
 except ImportError:
     tk = messagebox = ttk = None
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 APP_NAME = "AutoTyper"
 GITHUB_REPO = "jkjklol308-alt/AutoTyper"
 EXE_ASSET_NAME = "AutoTyper.exe"
@@ -2203,31 +2205,34 @@ def _palette_colours(name: str, definitions: Optional[Dict[str, Tuple[str, str, 
 
 
 # =============================================================================
-# 11a. CUSTOM UI COLOURS — MS-PAINT STYLE HEXAGON ("HONEYCOMB") PICKER MODEL
+# 11a. CUSTOM UI COLOURS — MS-PAINT STYLE GRADIENT ("EDIT COLOURS") MODEL
 # =============================================================================
 #
 # Everything in this block is pure data: no Tk objects are touched, so the
-# honeycomb geometry, the colour ramps and the saved-palette validation can be
+# gradient geometry, the colour ramps and the saved-palette validation can be
 # unit tested headlessly. The Tk widgets further down only render this model.
+#
+# The layout mirrors Microsoft Paint's "Edit colours" dialog: one big
+# gradient square (left->right = saturation, top->bottom = brightness, i.e.
+# every shade of the current hue) next to a thin rainbow strip that picks the
+# hue itself.
 
-HEXAGON_RINGS = 5            # rings of swatches around the white centre cell
-GREYSCALE_STEPS = 13         # black -> white strip underneath the honeycomb
+GRADIENT_WIDTH = 240         # px across the saturation axis of the square
+GRADIENT_HEIGHT = 160        # px down the brightness ("shade") axis
+HUE_STRIP_WIDTH = 22         # px-wide rainbow strip beside the square
 MAX_CUSTOM_PALETTES = 16     # guard against an unbounded settings file
 CUSTOM_PALETTE_ROLES = ("primary", "accent", "background")
 
 _HEX_COLOUR_RE = re.compile(r"^#?([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$")
-
-# Axial (q, r) neighbour directions for a pointy-top hexagonal grid.
-_AXIAL_DIRECTIONS = ((1, 0), (1, -1), (0, -1), (-1, 0), (-1, 1), (0, 1))
+_HEX_BYTE = tuple("{:02X}".format(value) for value in range(256))
 
 
-@dataclass(frozen=True)
-class HexCell:
-    """One hexagonal swatch of the honeycomb."""
-    q: int
-    r: int
-    ring: int
-    colour: str
+def clamp_unit(value) -> float:
+    """Clamp ``value`` into the 0..1 range every HSV component lives in."""
+    number = float(value)
+    if number != number:  # NaN
+        return 0.0
+    return min(max(number, 0.0), 1.0)
 
 
 def normalise_hex_colour(value) -> Optional[str]:
@@ -2255,59 +2260,121 @@ def hsv_to_hex(hue: float, saturation: float, value: float) -> str:
     return "#{:02X}{:02X}{:02X}".format(round(r * 255), round(g * 255), round(b * 255))
 
 
-def hexagon_ring_colour(ring: int, rings: int, hue: float) -> str:
-    """Colour for a cell on ``ring`` at angular position ``hue`` (0..1).
+def hex_to_hsv(colour) -> Optional[Tuple[float, float, float]]:
+    """Inverse of ``hsv_to_hex``; None when ``colour`` is not usable.
 
-    Mirrors the Microsoft colour hexagon: white in the middle, progressively
-    more saturated tints as you move outwards, and a ring of darker shades
-    right on the rim.
+    Grey/black/white come back with hue 0 and saturation 0, so callers that
+    keep a hue strip position must preserve their previous hue for them.
     """
-    if ring <= 0:
-        return "#FFFFFF"
-    if ring >= rings:
-        return hsv_to_hex(hue, 1.0, 0.56)
-    saturation = ring / max(1, rings - 1)
-    return hsv_to_hex(hue, saturation, 1.0)
+    normalised = normalise_hex_colour(colour)
+    if normalised is None:
+        return None
+    digits = normalised.lstrip("#")
+    r, g, b = (int(digits[index:index + 2], 16) / 255.0 for index in (0, 2, 4))
+    return colorsys.rgb_to_hsv(r, g, b)
 
 
-def build_colour_hexagon(rings: int = HEXAGON_RINGS) -> List[HexCell]:
-    """Build the honeycomb: one white centre plus ``6 * ring`` cells per ring."""
-    cells = [HexCell(0, 0, 0, "#FFFFFF")]
-    for ring in range(1, rings + 1):
-        # Walk the ring starting from the cell straight "below-left" of centre
-        # so that a given angular position keeps the same hue on every ring.
-        q = _AXIAL_DIRECTIONS[4][0] * ring
-        r = _AXIAL_DIRECTIONS[4][1] * ring
-        total = 6 * ring
-        index = 0
-        for dq, dr in _AXIAL_DIRECTIONS:
-            for _ in range(ring):
-                cells.append(HexCell(q, r, ring, hexagon_ring_colour(ring, rings, index / total)))
-                q += dq
-                r += dr
-                index += 1
-    return cells
+def point_to_sv(x: float, y: float, width: int = GRADIENT_WIDTH,
+                height: int = GRADIENT_HEIGHT) -> Tuple[float, float]:
+    """Saturation/brightness (each 0..1) at pixel ``(x, y)`` of the gradient.
+
+    Mirrors the Paint gradient square: white -> pure hue left to right
+    (saturation) and bright -> black top to bottom (brightness/value).
+    """
+    width = max(2, int(width))
+    height = max(2, int(height))
+    return (clamp_unit(x / (width - 1)), clamp_unit(1.0 - y / (height - 1)))
 
 
-def build_greyscale_strip(steps: int = GREYSCALE_STEPS) -> List[str]:
-    """Black-to-white hexagon row shown beneath the honeycomb."""
-    steps = max(2, steps)
-    return [hsv_to_hex(0.0, 0.0, index / (steps - 1)) for index in range(steps)]
+def sv_to_point(saturation: float, value: float, width: int = GRADIENT_WIDTH,
+                height: int = GRADIENT_HEIGHT) -> Tuple[float, float]:
+    """Pixel of the gradient square showing ``(saturation, value)``."""
+    width = max(2, int(width))
+    height = max(2, int(height))
+    return (clamp_unit(saturation) * (width - 1),
+            (1.0 - clamp_unit(value)) * (height - 1))
 
 
-def hexagon_centre(q: int, r: int, size: float) -> Tuple[float, float]:
-    """Pixel centre of axial cell (q, r) for pointy-top hexagons of ``size``."""
-    return (math.sqrt(3.0) * size * (q + r / 2.0), 1.5 * size * r)
+def hue_at(y: float, height: int = GRADIENT_HEIGHT) -> float:
+    """Hue (0..1, red at the top) shown at pixel row ``y`` of the rainbow."""
+    height = max(2, int(height))
+    return clamp_unit(y / (height - 1))
 
 
-def hexagon_points(cx: float, cy: float, size: float) -> List[float]:
-    """Flattened polygon coordinates for a pointy-top hexagon."""
-    points: List[float] = []
-    for corner in range(6):
-        angle = math.radians(60.0 * corner - 90.0)
-        points.append(cx + size * math.cos(angle))
-        points.append(cy + size * math.sin(angle))
-    return points
+def hue_to_y(hue: float, height: int = GRADIENT_HEIGHT) -> float:
+    """Pixel row of the rainbow strip that shows ``hue``."""
+    height = max(2, int(height))
+    return clamp_unit(hue) * (height - 1)
+
+
+def gradient_square_colour(hue: float, x: float, y: float,
+                           width: int = GRADIENT_WIDTH,
+                           height: int = GRADIENT_HEIGHT) -> str:
+    """The ``#RRGGBB`` colour painted at pixel ``(x, y)`` of the gradient."""
+    saturation, value = point_to_sv(x, y, width, height)
+    return hsv_to_hex(hue, saturation, value)
+
+
+def hue_strip_colour(y: float, height: int = GRADIENT_HEIGHT) -> str:
+    """The fully saturated colour at pixel row ``y`` of the rainbow strip."""
+    return hsv_to_hex(hue_at(y, height), 1.0, 1.0)
+
+
+def gradient_square_rows(hue: float, width: int = GRADIENT_WIDTH,
+                         height: int = GRADIENT_HEIGHT) -> List[str]:
+    """One ``{#RRGGBB ...}`` PhotoImage row per scanline of the gradient.
+
+    Pixel-for-pixel identical to ``gradient_square_colour``, but computed
+    without a per-pixel function call so dragging the hue strip re-renders
+    the whole square in milliseconds instead of hundreds of them. The
+    pre-computed columns evaluate exactly the expressions ``colorsys`` uses.
+    """
+    width = max(2, int(width))
+    height = max(2, int(height))
+    hue = float(hue) % 1.0
+    scaled = hue * 6.0
+    sector = int(scaled) % 6
+    frac = scaled - math.floor(scaled)
+    saturations = [x / (width - 1) for x in range(width)]
+    columns_p = [1.0 - s for s in saturations]
+    columns_q = [1.0 - s * frac for s in saturations]
+    columns_t = [1.0 - s * (1.0 - frac) for s in saturations]
+    hex_byte = _HEX_BYTE
+    rows: List[str] = []
+    for y in range(height):
+        v = 1.0 - y / (height - 1)
+        p = [v * c for c in columns_p]
+        q = [v * c for c in columns_q]
+        t = [v * c for c in columns_t]
+        full = (v,) * width
+        if sector == 0:
+            channels = zip(full, t, p)
+        elif sector == 1:
+            channels = zip(q, full, p)
+        elif sector == 2:
+            channels = zip(p, full, t)
+        elif sector == 3:
+            channels = zip(p, q, full)
+        elif sector == 4:
+            channels = zip(t, p, full)
+        else:
+            channels = zip(full, p, q)
+        rows.append("{" + " ".join(
+            "#" + hex_byte[round(r * 255)] + hex_byte[round(g * 255)] + hex_byte[round(b * 255)]
+            for r, g, b in channels) + "}")
+    return rows
+
+
+def hue_strip_rows(width: int = HUE_STRIP_WIDTH,
+                   height: int = GRADIENT_HEIGHT) -> List[str]:
+    """``{#RRGGBB ...}`` PhotoImage rows for the rainbow hue strip."""
+    width = max(1, int(width))
+    height = max(2, int(height))
+    rows: List[str] = []
+    for y in range(height):
+        colour = hue_strip_colour(y, height)
+        rows.append("{" + " ".join([colour] * width) + "}")
+    return rows
 
 
 def sanitise_custom_palettes(raw) -> Dict[str, Tuple[str, str, str]]:
@@ -2394,112 +2461,161 @@ _TkFrame = tk.Frame if tk is not None else object
 _TkToplevel = tk.Toplevel if tk is not None else object
 
 
-class ColourHexagonPicker(_TkFrame):
-    """The Microsoft Paint / Office style colour hexagon.
+class ColourGradientPicker(_TkFrame):
+    """The Microsoft Paint style colour picker ("Edit colours").
 
-    A honeycomb of hexagonal swatches (white in the middle, tints fanning out
-    by hue, dark shades on the rim) plus a black-to-white hexagon strip below
-    it. This is deliberately *not* the gradient/"Define Custom Colors" square:
-    every colour is a discrete hexagon you click.
+    A big gradient square shows every shade of the current hue at once —
+    white at the top-left, the pure hue at the top-right, black along the
+    bottom — and the rainbow strip beside it selects the hue. Click or drag
+    anywhere on either area: unlike a fixed swatch grid, every intermediate
+    colour is reachable, exactly like Paint's gradient dialog.
     """
 
-    def __init__(self, master, *, rings: int = HEXAGON_RINGS, cell_size: int = 13,
-                 on_pick=None, background: str = "#FFFFFF",
-                 outline: str = "#8C96A8", highlight: str = "#111827", **kwargs):
+    PAD = 10          # px of margin around the artwork
+    GAP = 16          # px between the gradient square and the hue strip
+    MARKER_R = 6      # radius of the ring marking the picked shade
+
+    def __init__(self, master, *, width: int = GRADIENT_WIDTH, height: int = GRADIENT_HEIGHT,
+                 hue_width: int = HUE_STRIP_WIDTH, on_pick=None, background: str = "#FFFFFF",
+                 border: str = "#8C96A8", marker: str = "#111827", **kwargs):
         super().__init__(master, bg=background, **kwargs)
-        self.rings = rings
-        self.cell_size = cell_size
+        self.width = max(2, int(width))
+        self.height = max(2, int(height))
+        self.hue_width = max(1, int(hue_width))
         self._on_pick = on_pick
-        self._outline = outline
-        self._highlight = highlight
-        self._item_colour: Dict[int, str] = {}
-        self._colour_items: Dict[str, List[int]] = {}
-        self._selected_item: Optional[int] = None
+        self._border = border
+        self._marker = marker
+        self._hsv: Tuple[float, float, float] = (0.0, 1.0, 1.0)
         self.selected_colour: Optional[str] = None
 
-        cells = build_colour_hexagon(rings)
-        centres = [(cell, hexagon_centre(cell.q, cell.r, cell_size)) for cell in cells]
-        xs = [point[0] for _, point in centres]
-        ys = [point[1] for _, point in centres]
-        pad = cell_size * 0.9
-        offset_x = pad + cell_size - min(xs)
-        offset_y = pad + cell_size - min(ys)
-        width = (max(xs) - min(xs)) + 2 * cell_size + 2 * pad
-        honeycomb_bottom = offset_y + max(ys) + cell_size
+        pad = self.PAD
+        self.square_box = (pad, pad, pad + self.width - 1, pad + self.height - 1)
+        hue_x = pad + self.width + self.GAP
+        self.hue_box = (hue_x, pad, hue_x + self.hue_width - 1, pad + self.height - 1)
 
-        strip = build_greyscale_strip()
-        strip_step = math.sqrt(3.0) * cell_size
-        strip_y = honeycomb_bottom + cell_size * 1.45
-        strip_width = strip_step * len(strip)
-        height = strip_y + cell_size + pad
-
-        self.canvas = tk.Canvas(self, width=round(max(width, strip_width + 2 * pad)),
-                                height=round(height), bg=background,
-                                highlightthickness=0, bd=0)
+        self.canvas = tk.Canvas(self, width=hue_x + self.hue_width + pad,
+                                height=pad * 2 + self.height, bg=background,
+                                highlightthickness=0, bd=0, cursor="crosshair")
         self.canvas.pack()
 
-        for cell, (cx, cy) in centres:
-            self._add_cell(cx + offset_x, cy + offset_y, cell.colour)
+        self._square_image = tk.PhotoImage(master=self, width=self.width, height=self.height)
+        self._hue_image = tk.PhotoImage(master=self, width=self.hue_width, height=self.height)
+        self.canvas.create_image(pad, pad, image=self._square_image, anchor="nw")
+        self.canvas.create_image(hue_x, pad, image=self._hue_image, anchor="nw")
 
-        strip_x = (max(width, strip_width + 2 * pad) - strip_width) / 2.0 + strip_step / 2.0
-        for index, colour in enumerate(strip):
-            self._add_cell(strip_x + index * strip_step, strip_y, colour)
+        sx0, sy0, sx1, sy1 = self.square_box
+        hx0, hy0, hx1, hy1 = self.hue_box
+        self.canvas.create_rectangle(sx0 - 1, sy0 - 1, sx1 + 1, sy1 + 1,
+                                     outline=border, fill="", width=1)
+        self.canvas.create_rectangle(hx0 - 1, hy0 - 1, hx1 + 1, hy1 + 1,
+                                     outline=border, fill="", width=1)
+        # A white ring around a dark ring stays visible on any shade, from
+        # near-white to near-black.
+        self._shade_marker_outer = self.canvas.create_oval(0, 0, 0, 0, outline="#FFFFFF",
+                                                           fill="", width=2)
+        self._shade_marker_inner = self.canvas.create_oval(0, 0, 0, 0, outline=marker,
+                                                           fill="", width=1)
+        self._hue_marker_outer = self.canvas.create_rectangle(0, 0, 0, 0, outline="#FFFFFF",
+                                                              fill="", width=2)
+        self._hue_marker_inner = self.canvas.create_rectangle(0, 0, 0, 0, outline=marker,
+                                                              fill="", width=1)
 
-    # -- construction helpers -----------------------------------------
-    def _add_cell(self, cx: float, cy: float, colour: str):
-        item = self.canvas.create_polygon(
-            hexagon_points(cx, cy, self.cell_size),
-            fill=colour, outline=self._outline, width=1, joinstyle="miter")
-        self._item_colour[item] = colour
-        self._colour_items.setdefault(colour, []).append(item)
-        self.canvas.tag_bind(item, "<Button-1>", lambda event, i=item: self._clicked(i))
-        self.canvas.tag_bind(item, "<Enter>",
-                             lambda event, i=item: self.canvas.configure(cursor="hand2"))
-        self.canvas.tag_bind(item, "<Leave>",
-                             lambda event: self.canvas.configure(cursor=""))
+        self.canvas.bind("<Button-1>", self._pointer)
+        self.canvas.bind("<B1-Motion>", self._pointer)
 
-    # -- interaction ---------------------------------------------------
-    def _clicked(self, item: int):
-        colour = self._item_colour.get(item)
-        if colour is None:
-            return
-        self._highlight_item(item)
-        self.selected_colour = colour
-        if self._on_pick is not None:
-            self._on_pick(colour)
+        self._render_hue_strip()
+        self._render_square()
+        self._move_markers()
 
-    def _highlight_item(self, item: Optional[int]):
-        if self._selected_item is not None:
-            try:
-                self.canvas.itemconfigure(self._selected_item, outline=self._outline, width=1)
-            except tk.TclError:
-                pass
-        self._selected_item = item
-        if item is not None:
-            try:
-                self.canvas.itemconfigure(item, outline=self._highlight, width=3)
-                self.canvas.tag_raise(item)
-            except tk.TclError:
-                pass
+    # -- properties ------------------------------------------------------
+    @property
+    def hsv(self) -> Tuple[float, float, float]:
+        """The hue/saturation/value currently shown by the markers."""
+        return self._hsv
+
+    # -- rendering -------------------------------------------------------
+    def _render_square(self):
+        try:
+            self._square_image.put("{" + " ".join(
+                gradient_square_rows(self._hsv[0], self.width, self.height)) + "}")
+        except tk.TclError:
+            pass  # destroyed mid-drag or no usable display: markers still move
+
+    def _render_hue_strip(self):
+        try:
+            self._hue_image.put("{" + " ".join(
+                hue_strip_rows(self.hue_width, self.height)) + "}")
+        except tk.TclError:
+            pass
+
+    def _move_markers(self):
+        sx0, sy0 = self.square_box[0], self.square_box[1]
+        hx0, hy0, hx1 = self.hue_box[0], self.hue_box[1], self.hue_box[2]
+        x, y = sv_to_point(self._hsv[1], self._hsv[2], self.width, self.height)
+        cx, cy = sx0 + x, sy0 + y
+        r = self.MARKER_R
+        hue_y = hy0 + hue_to_y(self._hsv[0], self.height)
+        try:
+            self.canvas.coords(self._shade_marker_outer, cx - r, cy - r, cx + r, cy + r)
+            self.canvas.coords(self._shade_marker_inner, cx - r + 2, cy - r + 2,
+                               cx + r - 2, cy + r - 2)
+            self.canvas.coords(self._hue_marker_outer, hx0 - 5, hue_y - 5, hx1 + 5, hue_y + 5)
+            self.canvas.coords(self._hue_marker_inner, hx0 - 3, hue_y - 3, hx1 + 3, hue_y + 3)
+        except tk.TclError:
+            pass
+
+    # -- interaction -----------------------------------------------------
+    def _pointer(self, event):
+        """Handle a click or a drag: whichever area the pointer is in wins."""
+        x = float(getattr(event, "x", 0))
+        y = float(getattr(event, "y", 0))
+        sx0, sy0, sx1, sy1 = self.square_box
+        hx0, hy0, hx1, hy1 = self.hue_box
+        slack = self.PAD / 2.0
+        hue, saturation, value = self._hsv
+        if sx0 - slack <= x <= sx1 + slack and sy0 - slack <= y <= sy1 + slack:
+            saturation, value = point_to_sv(x - sx0, y - sy0, self.width, self.height)
+        elif hx0 - slack <= x <= hx1 + slack and hy0 - slack <= y <= hy1 + slack:
+            hue = hue_at(y - hy0, self.height)
+        else:
+            return  # clicked the margin: keep the current colour
+        self._apply_hsv((hue, saturation, value))
+
+    def _apply_hsv(self, hsv: Tuple[float, float, float], notify: bool = True):
+        hue, saturation, value = (clamp_unit(part) for part in hsv)
+        hue_changed = hue != self._hsv[0]
+        self._hsv = (hue, saturation, value)
+        self.selected_colour = hsv_to_hex(hue, saturation, value)
+        if hue_changed:
+            self._render_square()
+        self._move_markers()
+        if notify and self._on_pick is not None:
+            self._on_pick(self.selected_colour)
 
     def set_selected(self, colour: Optional[str]):
-        """Highlight the hexagon holding ``colour`` (no callback fired)."""
-        normalised = normalise_hex_colour(colour) if colour else None
-        self.selected_colour = normalised
-        items = self._colour_items.get(normalised or "", [])
-        self._highlight_item(items[0] if items else None)
+        """Point the markers at ``colour`` without firing the callback.
 
-    def swatch_colours(self) -> List[str]:
-        """Every colour offered by the honeycomb, in drawing order."""
-        return [self._item_colour[item] for item in sorted(self._item_colour)]
+        Greys and black keep the hue the square already shows (Paint behaves
+        the same way), so choosing a neutral background does not scramble the
+        gradient the user was browsing.
+        """
+        hsv = hex_to_hsv(colour)
+        if hsv is None:
+            self.selected_colour = None
+            return
+        hue, saturation, value = hsv
+        if saturation == 0.0 or value == 0.0:
+            hue = self._hsv[0]
+        self._apply_hsv((hue, saturation, value), notify=False)
+        self.selected_colour = normalise_hex_colour(colour)
 
 
 class CustomPaletteEditor(_TkToplevel):
     """Dialog that builds and saves a user-defined palette.
 
     Three colour roles (primary, accent, background) are filled in from the
-    hexagon picker or typed as hex, previewed live, named, and then handed
-    back to the app through ``on_save``.
+    Paint-style gradient picker or typed as hex, previewed live, named, and
+    then handed back to the app through ``on_save``.
     """
 
     def __init__(self, master, colours: Dict[str, str], *, on_save,
@@ -2517,7 +2633,7 @@ class CustomPaletteEditor(_TkToplevel):
             "background": normalise_hex_colour(base[2]) or "#F8FAFC",
         }
 
-        self.title("Custom UI Colour — colour hexagon")
+        self.title("Custom UI Colour — Paint-style gradient")
         self.configure(background=c["background"])
         self.resizable(False, False)
         try:
@@ -2535,19 +2651,21 @@ class CustomPaletteEditor(_TkToplevel):
         tk.Label(body, text="Custom UI Colour", bg=c["background"], fg=c["primary"],
                  font=("Segoe UI", 16, "bold")).pack(anchor="w")
         tk.Label(body,
-                 text="Pick a hexagon for each role, name the set, then save it with the other palettes.",
-                 bg=c["background"], fg=c["muted"], font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 12))
+                 text="Drag in the gradient for lighter and darker shades, slide the rainbow strip\n"
+                      "to change the hue, then name the set and save it with the other palettes.",
+                 bg=c["background"], fg=c["muted"], font=("Segoe UI", 9),
+                 justify="left").pack(anchor="w", pady=(2, 12))
 
         main = tk.Frame(body, bg=c["background"])
         main.pack(fill="both", expand=True)
 
         left = tk.Frame(main, bg=c["background"])
         left.pack(side="left", anchor="n")
-        self.picker = ColourHexagonPicker(left, on_pick=self._picked,
-                                          background=c["surface"],
-                                          outline=c["muted"], highlight=c["foreground"],
-                                          highlightthickness=1,
-                                          highlightbackground=c["muted"])
+        self.picker = ColourGradientPicker(left, on_pick=self._picked,
+                                           background=c["surface"],
+                                           border=c["muted"], marker=c["foreground"],
+                                           highlightthickness=1,
+                                           highlightbackground=c["muted"])
         self.picker.pack(anchor="n")
 
         hex_row = tk.Frame(left, bg=c["background"])
@@ -2715,6 +2833,13 @@ class AutoTyperApp(_TkBase):
         self._preview_widgets = {}
         self._comboboxes = []
         self._download_thread = None
+        # Update/download affordances live inside the settings window (the
+        # header keeps only the Settings button), so these exist only while
+        # that window is open.
+        self._available_version: Optional[str] = None
+        self._download_exe_button = None
+        self._update_check_button = None
+        self._update_hint = None
 
         try:
             self.style = ttk.Style(self)
@@ -2827,7 +2952,7 @@ class AutoTyperApp(_TkBase):
         return name in getattr(self, "custom_palettes", {})
 
     def _open_custom_editor(self, name: Optional[str] = None):
-        """Open the colour hexagon editor for a new or existing custom palette."""
+        """Open the gradient colour editor for a new or existing custom palette."""
         if self._custom_editor is not None:
             try:
                 if self._custom_editor.winfo_exists():
@@ -3035,10 +3160,12 @@ class AutoTyperApp(_TkBase):
         ttk.Button(custom_buttons, text="Delete selected", style="App.TButton",
                    command=self._delete_custom_palette).pack(side="left", padx=(8, 0))
 
-        controls = tk.Frame(outer, bg=c["background"])
-        controls.pack(fill="x", pady=(14, 10))
+        window_box = tk.LabelFrame(outer, text=" Window ", bg=c["background"],
+                                   fg=c["primary"], bd=1, relief="groove",
+                                   padx=12, pady=10, font=("Segoe UI", 10, "bold"))
+        window_box.pack(fill="x", pady=(14, 0))
         self._topmost_checkbutton = tk.Checkbutton(
-            controls,
+            window_box,
             text="Keep Auto-Typer above other applications (prevents it disappearing when you click your editor)",
             variable=self.topmost_var,
             command=self._apply_topmost,
@@ -3047,12 +3174,23 @@ class AutoTyperApp(_TkBase):
             selectcolor=c["surface"], anchor="w",
         )
         self._topmost_checkbutton.pack(anchor="w")
+
+        updates_box = tk.LabelFrame(outer, text=" Updates & downloads ", bg=c["background"],
+                                    fg=c["primary"], bd=1, relief="groove",
+                                    padx=12, pady=10, font=("Segoe UI", 10, "bold"))
+        updates_box.pack(fill="x", pady=(14, 0))
+        self._update_hint = tk.Label(updates_box, text="", bg=c["background"], fg=c["muted"],
+                                     font=("Segoe UI", 9), justify="left", anchor="w",
+                                     wraplength=590)
+        self._update_hint.pack(anchor="w", pady=(0, 8))
         self._update_check_button = ttk.Button(
-            controls, text="Check for updates now", style="App.TButton",
+            updates_box, text="Check for updates now", style="App.TButton",
             command=self._manual_update_check)
-        self._update_check_button.pack(anchor="w", pady=(10, 0))
+        self._update_check_button.pack(anchor="w")
+        # The single place to fetch the published executable — the old header
+        # button duplicated this and has been removed to declutter the UI.
         self._download_exe_button = ttk.Button(
-            controls, text="⬇ Download latest AutoTyper.exe", style="App.TButton",
+            updates_box, text="⬇ Download latest AutoTyper.exe", style="App.TButton",
             command=self._start_exe_download)
         self._download_exe_button.pack(anchor="w", pady=(8, 0))
 
@@ -3075,15 +3213,19 @@ class AutoTyperApp(_TkBase):
         self._preview_widgets["button"].pack(side="right", padx=4, pady=20)
 
         self._settings_theme_widgets = [scroller, outer, palette_box, grid, custom_box,
-                                        custom_buttons, controls, preview_box, preview,
+                                        custom_buttons, window_box, updates_box,
+                                        preview_box, preview,
                                         self._settings_title, self._settings_subtitle,
-                                        self._custom_hint, self._topmost_checkbutton]
-        self._settings_headings = [palette_box, custom_box, preview_box]
+                                        self._custom_hint, self._update_hint,
+                                        self._topmost_checkbutton]
+        self._settings_headings = [palette_box, custom_box, window_box, updates_box,
+                                   preview_box]
 
         ttk.Button(outer, text="Close", style="App.TButton", command=self._close_settings).pack(anchor="e")
 
         self._refresh_palette_cards()
         self._refresh_settings_window()
+        self._refresh_update_controls()
 
     def _bind_settings_mousewheel(self, scroller):
         """Scroll the settings body with the wheel on Windows, macOS and X11."""
@@ -3104,7 +3246,7 @@ class AutoTyperApp(_TkBase):
             messagebox.showinfo(
                 "Pick your own colours first",
                 "Select one of your saved custom palettes to edit it, or press "
-                "“New colours…” to design one from the colour hexagon.")
+                "“New colours…” to design one on the colour gradient.")
             return
         self._open_custom_editor(self.palette_name)
 
@@ -3166,8 +3308,8 @@ class AutoTyperApp(_TkBase):
             try:
                 saved = len(self.custom_palettes)
                 self._custom_hint.configure(
-                    text=("Design your own palette on the Microsoft-style colour hexagon: pick a "
-                          "primary, accent and background colour, name it and save.\n"
+                    text=("Design your own palette on the Microsoft-Paint style colour gradient: "
+                          "drag for a shade, slide the rainbow strip for the hue, then name it and save.\n"
                           f"Saved custom palettes: {saved} of {MAX_CUSTOM_PALETTES}"
                           " — they appear with a ★ above (double-click one to edit it)."))
             except tk.TclError:
@@ -3193,6 +3335,11 @@ class AutoTyperApp(_TkBase):
         if self._custom_hint is not None:
             try:
                 self._custom_hint.configure(bg=c["background"], fg=c["muted"])
+            except tk.TclError:
+                pass
+        if self._update_hint is not None:
+            try:
+                self._update_hint.configure(bg=c["background"], fg=c["muted"])
             except tk.TclError:
                 pass
         self._topmost_checkbutton.configure(
@@ -3222,6 +3369,46 @@ class AutoTyperApp(_TkBase):
                 widget.configure(bg=c["accent"], fg=c["accent_foreground"],
                                  activebackground=c["primary"], activeforeground="#FFFFFF")
 
+    def _refresh_update_controls(self):
+        """Label the settings download button with the version it will fetch.
+
+        Safe to call at any time: while the settings window is closed the
+        button and hint simply do not exist yet, and the remembered version
+        is applied the next time the window opens.
+        """
+        latest = getattr(self, "_available_version", None)
+        button = getattr(self, "_download_exe_button", None)
+        if button is not None:
+            try:
+                if button.winfo_exists():
+                    button.configure(text=(f"⬇ Get v{latest} .exe" if latest
+                                           else "⬇ Download latest AutoTyper.exe"))
+            except tk.TclError:
+                pass
+        hint = getattr(self, "_update_hint", None)
+        if hint is not None:
+            try:
+                if hint.winfo_exists():
+                    hint.configure(text=(
+                        f"AutoTyper v{latest} is available (you have v{APP_VERSION}). The button "
+                        "below downloads the new executable — updating is always optional."
+                        if latest else
+                        f"You have v{APP_VERSION}. AutoTyper checks GitHub quietly when it opens; "
+                        "“Check for updates now” looks again on demand."))
+            except tk.TclError:
+                pass
+
+    def _set_download_button_state(self, state: str):
+        """Enable/disable the settings download button while a fetch runs."""
+        button = getattr(self, "_download_exe_button", None)
+        if button is None:
+            return
+        try:
+            if button.winfo_exists():
+                button.configure(state=state)
+        except tk.TclError:
+            pass
+
     def _close_settings(self):
         for sequence in getattr(self, "_settings_wheel_bindings", ()):  # stop scrolling the dead window
             try:
@@ -3240,6 +3427,9 @@ class AutoTyperApp(_TkBase):
         self._settings_headings = []
         self._palette_grid = None
         self._custom_hint = None
+        self._download_exe_button = None
+        self._update_check_button = None
+        self._update_hint = None
         self._preview_widgets = {}
 
     # ------------------------------------------------------------------
@@ -3254,16 +3444,9 @@ class AutoTyperApp(_TkBase):
             row=1, column=0, sticky="w", pady=(2, 0))
         self.settings_btn = ttk.Button(header, text="⚙ Settings", style="App.TButton", command=self._open_settings)
         self.settings_btn.grid(row=0, column=1, rowspan=2, sticky="e")
-        # Always available: fetches the published AutoTyper.exe from the
-        # newest GitHub release, so getting the executable never requires
-        # cloning the repository or installing Python.
-        self.download_btn = ttk.Button(header, text="⬇ Get .exe", style="App.TButton",
-                                       command=self._start_exe_download)
-        self.download_btn.grid(row=0, column=2, rowspan=2, sticky="e", padx=(6, 0))
-        # Not gridded here: it only appears when a newer version is found,
-        # and clicking it asks before downloading or installing anything.
-        self.update_btn = ttk.Button(header, text="⬇ Update available", style="App.TButton",
-                                     command=self._start_exe_download)
+        # The header deliberately keeps this one button: update checks and
+        # .exe downloads all live in the Settings window ("Updates &
+        # downloads"), so nothing redundant sits next to it out here.
 
         body = ttk.Frame(self, style="App.TFrame", padding=(24, 8, 24, 8))
         body.pack(fill="both", expand=True)
@@ -3593,11 +3776,10 @@ class AutoTyperApp(_TkBase):
             text=f"Status: Update available — v{latest} (you have v{APP_VERSION})",
             foreground=self.colors["accent"],
         )
-        try:
-            self.update_btn.config(text=f"⬇ Get v{latest} .exe")
-            self.update_btn.grid(row=0, column=3, rowspan=2, sticky="e", padx=(6, 0))
-        except tk.TclError:
-            pass
+        # Remember the version and relabel the settings download button (if
+        # the settings window happens to be open); the header stays clean.
+        self._available_version = latest
+        self._refresh_update_controls()
         has_exe = release.exe_asset is not None
         prompt = (
             f"{APP_NAME} v{latest} is available (you have v{APP_VERSION}).\n\n"
@@ -3637,7 +3819,7 @@ class AutoTyperApp(_TkBase):
         """Fetch the newest published .exe in the background (never blocks)."""
         if getattr(self, "_download_thread", None) is not None and self._download_thread.is_alive():
             return  # one download at a time
-        self.download_btn.config(state="disabled")
+        self._set_download_button_state("disabled")
         self._download_thread = threading.Thread(target=self._exe_download_worker, daemon=True)
         self._download_thread.start()
 
@@ -3674,7 +3856,7 @@ class AutoTyperApp(_TkBase):
 
     def _on_download_result(self, outcome: str, payload):
         """React to a finished download on the Tk main thread."""
-        self.download_btn.config(state="normal")
+        self._set_download_button_state("normal")
         self.progress["value"] = 0
         if outcome == "failed":
             self._post("status", "Status: Download failed", "#DC2626")

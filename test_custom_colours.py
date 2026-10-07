@@ -2,8 +2,8 @@
 
 Two layers are covered:
 
-  1. The pure model behind the Microsoft-Paint style colour hexagon
-     (honeycomb geometry, colour ramps, saved-palette validation).
+  1. The pure model behind the Microsoft-Paint style gradient colour picker
+     (shade-square geometry, the rainbow hue strip, saved-palette validation).
   2. The Tk widgets themselves, exercised against a miniature stub of
      ``tkinter`` so the picker and the editor dialog are smoke-tested on
      machines (CI included) that have no display or no Tk at all.
@@ -11,7 +11,6 @@ Two layers are covered:
 
 import importlib.util
 import json
-import math
 import sys
 import tempfile
 import types
@@ -28,8 +27,8 @@ MODULE_PATH = Path(__file__).resolve().parent / "auto_typer.py"
 # Pure model
 # ---------------------------------------------------------------------------
 class VersionTests(unittest.TestCase):
-    def test_version_is_1_0_0(self):
-        self.assertEqual(v2.APP_VERSION, "1.0.0")
+    def test_version_is_1_1_0(self):
+        self.assertEqual(v2.APP_VERSION, "1.1.0")
 
     def test_warm_terracotta_removed_and_order_shifted(self):
         names = list(v2.PALETTE_DEFINITIONS)
@@ -67,79 +66,117 @@ class HexColourTests(unittest.TestCase):
         self.assertEqual(v2.hsv_to_hex(0.0, -3.0, -3.0), "#000000")
 
 
-class HoneycombTests(unittest.TestCase):
-    def test_cell_count_matches_hex_number(self):
-        for rings in (1, 3, v2.HEXAGON_RINGS):
-            cells = v2.build_colour_hexagon(rings)
-            self.assertEqual(len(cells), 1 + 3 * rings * (rings + 1))
+class HexToHsvTests(unittest.TestCase):
+    def test_primaries_land_where_expected(self):
+        self.assertEqual(v2.hex_to_hsv("#FF0000"), (0.0, 1.0, 1.0))
+        self.assertEqual(v2.hex_to_hsv("#FFFFFF"), (0.0, 0.0, 1.0))
+        self.assertEqual(v2.hex_to_hsv("#000000"), (0.0, 0.0, 0.0))
+        h, s, v = v2.hex_to_hsv("#00FF00")
+        self.assertAlmostEqual(h, 1.0 / 3.0)
+        self.assertEqual((s, v), (1.0, 1.0))
 
-    def test_centre_cell_is_white(self):
-        cells = v2.build_colour_hexagon()
-        self.assertEqual(cells[0].colour, "#FFFFFF")
-        self.assertEqual((cells[0].q, cells[0].r, cells[0].ring), (0, 0, 0))
+    def test_accepts_every_hex_spelling(self):
+        self.assertEqual(v2.hex_to_hsv("abc"), v2.hex_to_hsv("#AABBCC"))
 
-    def test_every_cell_has_a_unique_axial_position(self):
-        cells = v2.build_colour_hexagon()
-        positions = {(cell.q, cell.r) for cell in cells}
-        self.assertEqual(len(positions), len(cells))
+    def test_rejects_rubbish(self):
+        for value in ("", "red", "#12345", None, 42):
+            self.assertIsNone(v2.hex_to_hsv(value))
 
-    def test_axial_distance_equals_ring_index(self):
-        for cell in v2.build_colour_hexagon():
-            distance = (abs(cell.q) + abs(cell.q + cell.r) + abs(cell.r)) // 2
-            self.assertEqual(distance, cell.ring)
+    def test_round_trips_through_hsv_to_hex(self):
+        for colour in ("#3B82F6", "#123456", "#F97316", "#808080", "#010203"):
+            self.assertEqual(v2.hsv_to_hex(*v2.hex_to_hsv(colour)), colour)
 
-    def test_colours_are_valid_hex(self):
-        for cell in v2.build_colour_hexagon():
-            self.assertEqual(v2.normalise_hex_colour(cell.colour), cell.colour)
 
-    def test_rim_ring_is_darker_than_inner_tints(self):
-        cells = v2.build_colour_hexagon()
-        rim = [c for c in cells if c.ring == v2.HEXAGON_RINGS]
-        inner = [c for c in cells if 0 < c.ring < v2.HEXAGON_RINGS]
+class GradientModelTests(unittest.TestCase):
+    """The pure model behind the Paint-style gradient square + hue strip."""
 
-        def brightness(colour):
-            value = colour.lstrip("#")
-            return max(int(value[i:i + 2], 16) for i in (0, 2, 4))
+    def test_point_to_sv_maps_corners_like_paint(self):
+        w, h = v2.GRADIENT_WIDTH, v2.GRADIENT_HEIGHT
+        self.assertEqual(v2.point_to_sv(0, 0, w, h), (0.0, 1.0))        # white
+        self.assertEqual(v2.point_to_sv(w - 1, 0, w, h), (1.0, 1.0))    # pure hue
+        self.assertEqual(v2.point_to_sv(0, h - 1, w, h), (0.0, 0.0))    # black
+        self.assertEqual(v2.point_to_sv(w - 1, h - 1, w, h), (1.0, 0.0))
 
-        self.assertTrue(all(brightness(c.colour) < 200 for c in rim))
-        self.assertTrue(all(brightness(c.colour) == 255 for c in inner))
+    def test_point_to_sv_clamps_outside_the_square(self):
+        w, h = v2.GRADIENT_WIDTH, v2.GRADIENT_HEIGHT
+        self.assertEqual(v2.point_to_sv(-50, -50, w, h), (0.0, 1.0))
+        self.assertEqual(v2.point_to_sv(w + 50, h + 50, w, h), (1.0, 0.0))
 
-    def test_saturation_grows_outwards(self):
-        cells = {(c.q, c.r): c.colour for c in v2.build_colour_hexagon()}
-        # Straight line of cells away from the centre: white -> saturated.
-        previous = None
-        for step in range(0, v2.HEXAGON_RINGS):
-            colour = cells[(step, 0)]
-            value = colour.lstrip("#")
-            r, g, b = (int(value[i:i + 2], 16) for i in (0, 2, 4))
-            spread = max(r, g, b) - min(r, g, b)
-            if previous is not None:
-                self.assertGreater(spread, previous)
-            previous = spread
+    def test_sv_to_point_is_the_inverse(self):
+        w, h = 11, 9
+        for x in range(w):
+            for y in range(h):
+                px, py = v2.sv_to_point(*v2.point_to_sv(x, y, w, h), width=w, height=h)
+                self.assertAlmostEqual(px, x)
+                self.assertAlmostEqual(py, y)
 
-    def test_greyscale_strip_runs_black_to_white(self):
-        strip = v2.build_greyscale_strip()
-        self.assertEqual(strip[0], "#000000")
-        self.assertEqual(strip[-1], "#FFFFFF")
-        self.assertEqual(len(strip), v2.GREYSCALE_STEPS)
-        self.assertEqual(len(set(strip)), len(strip))
+    def test_hue_at_and_hue_to_y_are_inverses(self):
+        for y in range(v2.GRADIENT_HEIGHT):
+            self.assertAlmostEqual(v2.hue_to_y(v2.hue_at(y), v2.GRADIENT_HEIGHT), y)
+        self.assertEqual(v2.hue_at(-10), 0.0)
+        self.assertEqual(v2.hue_at(10_000), 1.0)
 
-    def test_geometry_tiles_without_overlapping(self):
-        size = 10.0
-        centres = [v2.hexagon_centre(c.q, c.r, size) for c in v2.build_colour_hexagon(2)]
-        spacing = math.sqrt(3.0) * size
-        for index, (x1, y1) in enumerate(centres):
-            for x2, y2 in centres[index + 1:]:
-                distance = math.hypot(x1 - x2, y1 - y2)
-                self.assertGreater(distance, spacing - 1e-6)
+    def test_gradient_corners_are_white_hue_and_black(self):
+        w, h = v2.GRADIENT_WIDTH, v2.GRADIENT_HEIGHT
+        self.assertEqual(v2.gradient_square_colour(0.0, 0, 0, w, h), "#FFFFFF")
+        self.assertEqual(v2.gradient_square_colour(0.0, w - 1, 0, w, h), "#FF0000")
+        self.assertEqual(v2.gradient_square_colour(0.0, 0, h - 1, w, h), "#000000")
+        self.assertEqual(v2.gradient_square_colour(0.0, w - 1, h - 1, w, h), "#000000")
+        self.assertEqual(v2.gradient_square_colour(1.0 / 3.0, w - 1, 0, w, h), "#00FF00")
 
-    def test_hexagon_points_are_pointy_top(self):
-        points = v2.hexagon_points(0.0, 0.0, 10.0)
-        self.assertEqual(len(points), 12)
-        xs = points[0::2]
-        ys = points[1::2]
-        self.assertAlmostEqual(min(ys), -10.0)        # a vertex straight up
-        self.assertAlmostEqual(max(xs) - min(xs), math.sqrt(3.0) * 10.0)
+    def test_left_edge_of_the_square_is_greyscale(self):
+        for y in (0, 40, 80, 120, v2.GRADIENT_HEIGHT - 1):
+            colour = v2.gradient_square_colour(0.35, 0, y)
+            r, g, b = (int(colour[i:i + 2], 16) for i in (1, 3, 5))
+            self.assertEqual(r, g)
+            self.assertEqual(g, b)
+
+    def test_square_rows_match_the_per_pixel_function_exactly(self):
+        # Dyadic sizes and hues keep every float operation exact, so the
+        # fast row builder must agree with gradient_square_colour bit for bit.
+        w, h = 9, 5
+        for hue in (0.0, 0.25, 1.0 / 3.0, 0.5, 0.75, 5.0 / 6.0):
+            rows = v2.gradient_square_rows(hue, w, h)
+            self.assertEqual(len(rows), h)
+            for y, row in enumerate(rows):
+                cells = row[1:-1].split(" ")
+                self.assertEqual(len(cells), w)
+                for x, cell in enumerate(cells):
+                    self.assertEqual(cell, v2.gradient_square_colour(hue, x, y, w, h),
+                                     f"hue={hue} x={x} y={y}")
+
+    def test_square_rows_are_valid_photo_image_data(self):
+        rows = v2.gradient_square_rows(0.6, 16, 8)
+        for row in rows:
+            self.assertTrue(row.startswith("{") and row.endswith("}"))
+            for colour in row[1:-1].split(" "):
+                self.assertEqual(v2.normalise_hex_colour(colour), colour)
+
+    def test_square_rows_cover_the_full_size(self):
+        rows = v2.gradient_square_rows(0.6)
+        self.assertEqual(len(rows), v2.GRADIENT_HEIGHT)
+        self.assertEqual(len(rows[0][1:-1].split(" ")), v2.GRADIENT_WIDTH)
+
+    def test_hue_strip_runs_through_the_rainbow(self):
+        h = 7  # y/(h-1) hits 0, 1/6 ... 1 exactly
+        rows = v2.hue_strip_rows(4, h)
+        self.assertEqual(len(rows), h)
+        colours = [row[1:-1].split(" ") for row in rows]
+        for row in colours:
+            self.assertEqual(len(set(row)), 1)          # each row is one hue
+            self.assertEqual(len(row), 4)
+        self.assertEqual(colours[0][0], "#FF0000")      # top: red
+        self.assertEqual(colours[1][0], "#FFFF00")      # yellow
+        self.assertEqual(colours[2][0], "#00FF00")      # green
+        self.assertEqual(colours[3][0], "#00FFFF")      # cyan
+        self.assertEqual(colours[4][0], "#0000FF")      # blue
+        self.assertEqual(colours[5][0], "#FF00FF")      # magenta
+        self.assertEqual(colours[6][0], "#FF0000")      # bottom wraps to red
+
+    def test_hue_strip_colour_matches_the_rows(self):
+        for y in (0, 13, 79, v2.GRADIENT_HEIGHT - 1):
+            row = v2.hue_strip_rows(v2.HUE_STRIP_WIDTH, v2.GRADIENT_HEIGHT)[y]
+            self.assertEqual(row[1:-1].split(" ")[0], v2.hue_strip_colour(y))
 
 
 class CustomPaletteStorageTests(unittest.TestCase):
@@ -326,17 +363,37 @@ class _StubCanvas(_StubWidget):
         self.item_bindings = {}
         self._next_id = 1
 
-    def create_polygon(self, points, **kwargs):
+    def _new_item(self, **record):
         item = self._next_id
         self._next_id += 1
-        self.items[item] = {"points": list(points), **kwargs}
+        self.items[item] = record
         return item
 
+    def create_polygon(self, points, **kwargs):
+        return self._new_item(points=list(points), **kwargs)
+
     def create_window(self, *args, **kwargs):
-        item = self._next_id
-        self._next_id += 1
-        self.items[item] = {"window": True}
-        return item
+        return self._new_item(embedded=True, **kwargs)
+
+    def create_image(self, x, y, **kwargs):
+        return self._new_item(image_at=(x, y), **kwargs)
+
+    def create_rectangle(self, *points, **kwargs):
+        return self._new_item(rectangle=list(points), **kwargs)
+
+    def create_oval(self, *points, **kwargs):
+        return self._new_item(oval=list(points), **kwargs)
+
+    def coords(self, item, *points):
+        record = self.items.setdefault(item, {})
+        if points:
+            record["coords"] = list(points)
+            return None
+        return record.get("coords", [])
+
+    def delete(self, *items):
+        for item in items:
+            self.items.pop(item, None)
 
     def tag_bind(self, item, sequence, func=None, add=None):
         self.item_bindings.setdefault((item, sequence), []).append(func)
@@ -360,6 +417,38 @@ class _StubCanvas(_StubWidget):
     def click(self, item):
         for callback in self.item_bindings.get((item, "<Button-1>"), []):
             callback(types.SimpleNamespace(x=0, y=0))
+
+    # pointer events on the canvas itself, as the gradient picker uses them
+    def press(self, x, y):
+        self._dispatch("<Button-1>", x, y)
+
+    def drag(self, x, y):
+        self._dispatch("<B1-Motion>", x, y)
+
+    def _dispatch(self, sequence, x, y):
+        for callback in self.bindings.get(sequence, []):
+            callback(types.SimpleNamespace(x=x, y=y))
+
+
+class _StubPhotoImage:
+    """Stands in for ``tk.PhotoImage``; records the pixel data it is fed."""
+
+    def __init__(self, master=None, **kwargs):
+        self.master = master
+        self.kw = dict(kwargs)
+        self.puts = []
+
+    def put(self, data, *args, **kwargs):
+        self.puts.append(data)
+
+    def blank(self):
+        self.puts.clear()
+
+    def width(self):
+        return self.kw.get("width", 1)
+
+    def height(self):
+        return self.kw.get("height", 1)
 
 
 class _StubStyle:
@@ -408,6 +497,7 @@ def _make_tk_stub():
     tk_module.Scale = _StubWidget
     tk_module.Text = _StubWidget
     tk_module.Canvas = _StubCanvas
+    tk_module.PhotoImage = _StubPhotoImage
     tk_module.StringVar = _StubVariable
     tk_module.BooleanVar = _StubVariable
     tk_module.IntVar = _StubVariable
@@ -458,7 +548,7 @@ def _load_module_with_tk_stub():
 
 
 class WidgetTests(unittest.TestCase):
-    """Smoke tests for the hexagon picker and the custom palette editor."""
+    """Smoke tests for the gradient picker and the custom palette editor."""
 
     @classmethod
     def setUpClass(cls):
@@ -468,35 +558,100 @@ class WidgetTests(unittest.TestCase):
         self.messagebox.calls.clear()
         self.root = self.mod.tk.Frame(None)
 
-    def test_picker_draws_every_swatch(self):
-        picker = self.mod.ColourHexagonPicker(self.root)
-        expected = len(self.mod.build_colour_hexagon()) + self.mod.GREYSCALE_STEPS
-        self.assertEqual(len(picker.canvas.items), expected)
-        self.assertEqual(len(picker.swatch_colours()), expected)
+    # -- picker ---------------------------------------------------------
+    def _picker(self, **kwargs):
+        kwargs.setdefault("width", 11)
+        kwargs.setdefault("height", 11)
+        kwargs.setdefault("hue_width", 3)
+        return self.mod.ColourGradientPicker(self.root, **kwargs)
 
-    def test_clicking_a_hexagon_reports_its_colour(self):
+    def test_picker_paints_the_gradient_and_the_rainbow(self):
+        picker = self._picker()
+        expected_square = "{" + " ".join(self.mod.gradient_square_rows(0.0, 11, 11)) + "}"
+        expected_strip = "{" + " ".join(self.mod.hue_strip_rows(3, 11)) + "}"
+        self.assertEqual(picker._square_image.puts, [expected_square])
+        self.assertEqual(picker._hue_image.puts, [expected_strip])
+
+    def test_clicking_the_square_reports_the_shade_under_the_pointer(self):
         picked = []
-        picker = self.mod.ColourHexagonPicker(self.root, on_pick=picked.append)
-        item = sorted(picker.canvas.items)[0]
-        picker.canvas.click(item)
-        self.assertEqual(picked, ["#FFFFFF"])          # centre cell
-        self.assertEqual(picker.selected_colour, "#FFFFFF")
-        self.assertEqual(picker.canvas.items[item]["width"], 3)
+        picker = self._picker(on_pick=picked.append)
+        sx0, sy0, sx1, sy1 = picker.square_box
+        picker.canvas.press(sx0, sy0)                # top-left: white
+        self.assertEqual(picked[-1], "#FFFFFF")
+        picker.canvas.press(sx1, sy0)                # top-right: pure hue (red)
+        self.assertEqual(picked[-1], "#FF0000")
+        picker.canvas.press(sx0 + 5, sy0 + 5)        # middle: half shade
+        self.assertEqual(picked[-1],
+                         self.mod.gradient_square_colour(0.0, 5, 5, 11, 11))
+        picker.canvas.press(sx0, sy1)                # bottom-left: black
+        self.assertEqual(picked[-1], "#000000")
+        self.assertEqual(picker.selected_colour, "#000000")
 
-    def test_selection_highlight_moves(self):
-        picker = self.mod.ColourHexagonPicker(self.root)
-        first, second = sorted(picker.canvas.items)[:2]
-        picker.canvas.click(first)
-        picker.canvas.click(second)
-        self.assertEqual(picker.canvas.items[first]["width"], 1)
-        self.assertEqual(picker.canvas.items[second]["width"], 3)
+    def test_dragging_inside_the_square_streams_colours(self):
+        picked = []
+        picker = self._picker(on_pick=picked.append)
+        sx0, sy0 = picker.square_box[0], picker.square_box[1]
+        picker.canvas.press(sx0 + 5, sy0)
+        picker.canvas.drag(sx0 + 5, sy0 + 10)
+        self.assertEqual(len(picked), 2)
+        self.assertEqual(picked[-1], picker.selected_colour)
 
-    def test_set_selected_accepts_known_and_unknown_colours(self):
-        picker = self.mod.ColourHexagonPicker(self.root)
-        picker.set_selected("#ffffff")
-        self.assertEqual(picker.selected_colour, "#FFFFFF")
-        picker.set_selected("#123456")                 # not on the honeycomb
+    def test_dragging_the_hue_strip_repaints_the_square(self):
+        picked = []
+        picker = self._picker(width=11, height=13, on_pick=picked.append)
+        hx0, hy0 = picker.hue_box[0], picker.hue_box[1]
+        renders_before = len(picker._square_image.puts)
+        picker.canvas.press(hx0 + 1, hy0 + 4)        # hue = 4/12 = green
+        self.assertEqual(picked[-1], "#00FF00")      # square kept s=1, v=1
+        self.assertEqual(len(picker._square_image.puts), renders_before + 1)
+        expected = "{" + " ".join(self.mod.gradient_square_rows(1 / 3, 11, 13)) + "}"
+        self.assertEqual(picker._square_image.puts[-1], expected)
+        # ...and the square's top-right corner is now pure green.
+        sx0, sy0, sx1, _ = picker.square_box
+        picker.canvas.press(sx1, sy0)
+        self.assertEqual(picked[-1], "#00FF00")
+
+    def test_clicks_in_the_margin_are_ignored(self):
+        picked = []
+        picker = self._picker(on_pick=picked.append)
+        picker.canvas.press(1, 1)                    # outside both areas
+        self.assertEqual(picked, [])
+        self.assertIsNone(picker.selected_colour)
+
+    def test_set_selected_moves_the_markers_without_a_callback(self):
+        picked = []
+        picker = self._picker(on_pick=picked.append)
+        picker.set_selected("#00FF00")
+        self.assertEqual(picked, [])                 # programmatic: no callback
+        self.assertEqual(picker.selected_colour, "#00FF00")
+        hue, saturation, value = picker.hsv
+        self.assertAlmostEqual(hue, 1 / 3)
+        self.assertEqual((saturation, value), (1.0, 1.0))
+        sx0, sy0, sx1, _ = picker.square_box
+        coords = picker.canvas.items[picker._shade_marker_outer]["coords"]
+        self.assertAlmostEqual(coords[0], sx1 - picker.MARKER_R)
+        self.assertAlmostEqual(coords[1], sy0 - picker.MARKER_R)
+        hue_coords = picker.canvas.items[picker._hue_marker_outer]["coords"]
+        self.assertAlmostEqual((hue_coords[1] + hue_coords[3]) / 2,
+                               sy0 + self.mod.hue_to_y(1 / 3, 11))
+
+    def test_set_selected_echoes_the_exact_colour(self):
+        picker = self._picker()
+        picker.set_selected("#123456")               # reachable only via hex
         self.assertEqual(picker.selected_colour, "#123456")
+        picker.set_selected("banana")
+        self.assertIsNone(picker.selected_colour)
+        picker.set_selected(None)
+        self.assertIsNone(picker.selected_colour)
+
+    def test_greys_keep_the_hue_the_square_already_shows(self):
+        picker = self._picker(width=11, height=13)
+        hx0, hy0 = picker.hue_box[0], picker.hue_box[1]
+        picker.canvas.press(hx0 + 1, hy0 + 4)        # green square
+        picker.set_selected("#808080")
+        self.assertEqual(picker.selected_colour, "#808080")
+        self.assertEqual(picker.hsv[1], 0.0)
+        self.assertAlmostEqual(picker.hsv[0], 1 / 3)
 
     # -- editor ---------------------------------------------------------
     def _editor(self, **kwargs):
@@ -643,25 +798,25 @@ class AppIntegrationTests(unittest.TestCase):
         editor.role_var.set("accent")
         editor._role_changed()
         editor._picked("#00FF00")
-        editor.name_var.set("Hexagon Green")
+        editor.name_var.set("Gradient Green")
         editor._save()
 
-        self.assertEqual(self.app.palette_name, "Hexagon Green")
-        self.assertEqual(self.app.custom_palettes["Hexagon Green"][1], "#00FF00")
-        self.assertIn("★ Hexagon Green", [radio.cget("text")
-                                          for _, radio, _, _ in self.app._settings_cards])
-        self.assertEqual(self._cards()[-1], "Hexagon Green")
+        self.assertEqual(self.app.palette_name, "Gradient Green")
+        self.assertEqual(self.app.custom_palettes["Gradient Green"][1], "#00FF00")
+        self.assertIn("★ Gradient Green", [radio.cget("text")
+                                           for _, radio, _, _ in self.app._settings_cards])
+        self.assertEqual(self._cards()[-1], "Gradient Green")
 
         saved = json.loads(self.tmp.read_text(encoding="utf-8"))
-        self.assertEqual(saved["palette"], "Hexagon Green")
-        self.assertEqual(saved["custom_palettes"]["Hexagon Green"][1], "#00FF00")
+        self.assertEqual(saved["palette"], "Gradient Green")
+        self.assertEqual(saved["custom_palettes"]["Gradient Green"][1], "#00FF00")
 
     def test_saved_palettes_reload_on_the_next_start(self):
-        self.app._save_custom_palette("Hexagon Green", ("#101010", "#00FF00", "#FFFFFF"))
+        self.app._save_custom_palette("Gradient Green", ("#101010", "#00FF00", "#FFFFFF"))
         reopened = self.mod.AutoTyperApp()
         self.assertEqual(reopened.custom_palettes,
-                         {"Hexagon Green": ("#101010", "#00FF00", "#FFFFFF")})
-        self.assertEqual(reopened.palette_name, "Hexagon Green")
+                         {"Gradient Green": ("#101010", "#00FF00", "#FFFFFF")})
+        self.assertEqual(reopened.palette_name, "Gradient Green")
         self.assertEqual(reopened.colors["accent"], "#00FF00")
 
     def test_a_missing_palette_falls_back_to_the_default(self):
@@ -698,9 +853,51 @@ class AppIntegrationTests(unittest.TestCase):
         self.app._close_settings()
         self.assertIsNone(self.app._settings_window)
         self.assertIsNone(self.app._palette_grid)
+        self.assertIsNone(self.app._download_exe_button)
+        self.assertIsNone(self.app._update_hint)
         self.assertEqual(self.app._settings_cards, [])
         # Rebuilding the cards with no window must not explode.
         self.app._refresh_palette_cards()
+        self.app._set_download_button_state("disabled")
+        self.app._refresh_update_controls()
+
+    # -- tidied header & the settings-hosted update controls --------------
+    def test_header_keeps_only_the_settings_button(self):
+        self.assertTrue(hasattr(self.app, "settings_btn"))
+        self.assertFalse(hasattr(self.app, "download_btn"))
+        self.assertFalse(hasattr(self.app, "update_btn"))
+
+    def test_settings_window_hosts_the_exe_download(self):
+        self.app._open_settings()
+        self.assertIsNotNone(self.app._download_exe_button)
+        self.assertIn("AutoTyper.exe", self.app._download_exe_button.cget("text"))
+        self.assertIn(str(self.mod.APP_VERSION), self.app._update_hint.cget("text"))
+
+    def _announce(self, version="9.9.9"):
+        """Feed the app an available update, declining the download prompt."""
+        release = self.mod.ReleaseInfo(
+            version=version,
+            assets=(self.mod.UpdateAsset(self.mod.EXE_ASSET_NAME,
+                                         "https://example.invalid/AutoTyper.exe"),))
+        previous = self.messagebox.askyesno
+        self.messagebox.askyesno = lambda *args, **kwargs: False
+        try:
+            self.app._on_update_available(release)
+        finally:
+            self.messagebox.askyesno = previous
+
+    def test_an_available_update_relabels_the_settings_button(self):
+        self.app._open_settings()
+        self._announce("9.9.9")
+        self.assertEqual(self.app._available_version, "9.9.9")
+        self.assertIn("v9.9.9", self.app._download_exe_button.cget("text"))
+        self.assertIn("9.9.9", self.app._update_hint.cget("text"))
+        self.assertIn("9.9.9", self.app.status_label.cget("text"))
+
+    def test_reopening_settings_remembers_the_available_version(self):
+        self._announce("9.9.9")                      # settings window closed
+        self.app._open_settings()
+        self.assertIn("v9.9.9", self.app._download_exe_button.cget("text"))
 
     def test_custom_palette_limit_is_reported(self):
         for index in range(self.mod.MAX_CUSTOM_PALETTES):

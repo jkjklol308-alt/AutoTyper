@@ -8,7 +8,7 @@ A high-fidelity keystroke trace simulator and auto-typer featuring motor kinemat
 2. Download **`AutoTyper.exe`**.
 3. Run it. That's it — the executable is self-contained.
 
-You can also grab the executable from inside the app itself: press **⬇ Get .exe** in the header (or **⬇ Download latest AutoTyper.exe** in ⚙ Settings). The updater always fetches the built executable — never a Python script.
+You can also grab the executable from inside the app itself: open **⚙ Settings** and press **⬇ Download latest AutoTyper.exe** under *Updates & downloads*. The updater always fetches the built executable — never a Python script.
 
 ### Running from source instead
 
@@ -22,7 +22,7 @@ python auto_typer.py --check-update
 
 AutoTyper checks the newest GitHub release once, silently, when the window opens. It stays completely quiet unless a genuinely newer version exists, and it never blocks startup or forces an upgrade.
 
-When an update does exist, the **⬇ Get vX .exe** button appears and you choose what happens:
+When an update does exist, the status bar names the new version, AutoTyper asks once whether to download it, and the download button in ⚙ Settings is relabelled **⬇ Get vX .exe**. You always choose what happens:
 
 | How you are running | What updating does |
 | --- | --- |
@@ -85,12 +85,12 @@ python -m unittest test_auto_typer.py test_custom_colours.py test_update_checker
 
 ## Custom UI Colours
 
-![The colour hexagon used by the custom colour picker](docs/colour-hexagon.png)
+![The Paint-style gradient used by the custom colour picker](docs/colour-gradient.png)
 
-Appearance settings live in ⚙ Settings:
+The header keeps a single **⚙ Settings** button — palettes, window behaviour and updates all live inside it:
 
-- **Custom “UI colour” section**: press **🎨 New colours…** to open the editor, which uses the *Microsoft Paint / Office style colour hexagon* — a honeycomb of discrete hexagonal swatches (white in the middle, tints fanning out by hue, darker shades on the rim) plus a black‑to‑white hexagon strip. It is deliberately **not** the gradient/"Define Custom Colors" square.
-- Choose a **Primary**, **Accent** and **Background** colour (click a hexagon or type `#RRGGBB`), watch the live preview, give the set a name, and **Save colours**.
+- **Custom “UI colour” section**: press **🎨 New colours…** to open the editor, which uses the *Microsoft Paint “Edit colours” style gradient picker* — a big shade square (white → pure colour left to right, bright → black top to bottom) beside a rainbow hue strip. Click or **drag** anywhere in the gradient to reach any shade of the current hue, and slide the strip to sweep through hues; every intermediate colour is reachable, not just a fixed set of swatches.
+- Choose a **Primary**, **Accent** and **Background** colour (drag in the gradient or type `#RRGGBB`), watch the live preview, give the set a name, and **Save colours**.
 - Saved palettes appear in the palette grid marked with a ★, are applied instantly, survive restarts (stored in `~/.autotyper_settings.json`; settings from earlier releases under the old file name are picked up automatically), and can be re-opened for editing by double-clicking a card or pressing **Edit selected**. **Delete selected** removes one; built-in palettes cannot be deleted. Up to 16 custom palettes are kept.
 
 ## Building the executable yourself
@@ -100,4 +100,4 @@ pip install pyinstaller pynput
 pyinstaller AutoTyper.spec --noconfirm     # -> dist/AutoTyper.exe
 ```
 
-Pushing a tag that matches `APP_VERSION` (for example `v1.0.0`) makes GitHub Actions run the tests, build the executable and attach it to a release automatically — see `.github/workflows/release.yml`.
+Pushing a tag that matches `APP_VERSION` (for example `v1.1.0`) makes GitHub Actions run the tests, build the executable and attach it to a release automatically — see `.github/workflows/release.yml`.
