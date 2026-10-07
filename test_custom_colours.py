@@ -124,10 +124,21 @@ class GradientModelTests(unittest.TestCase):
         self.assertEqual(v2.gradient_square_colour(0, h - 1, 0.5, w, h), "#808080")
         self.assertEqual(v2.gradient_square_colour(123, 45, 0.0, w, h), "#000000")
 
+    def test_rendered_shade_never_goes_dark(self):
+        # The field is drawn at the held shade, but a nearly black colour must
+        # not turn the whole box black: it is floored, and the exact colour is
+        # shown by the swatch and the hex box instead.
+        self.assertEqual(v2.rendered_shade(1.0), 1.0)
+        self.assertEqual(v2.rendered_shade(0.54), 0.54)
+        self.assertEqual(v2.rendered_shade(v2.FIELD_MIN_SHADE), v2.FIELD_MIN_SHADE)
+        self.assertEqual(v2.rendered_shade(0.0), v2.FIELD_MIN_SHADE)
+        self.assertEqual(v2.rendered_shade(-3), v2.FIELD_MIN_SHADE)
+        self.assertEqual(v2.rendered_shade(9), 1.0)
+
     def test_top_row_of_the_field_is_the_rainbow(self):
         w, h = 7, 3
-        rows = v2.gradient_square_rows(1.0, w, h)
-        top = rows[0][1:-1].split(" ")
+        rows = v2.ppm_pixels(v2.gradient_square_ppm(1.0, w, h), w, h)
+        top = rows[0].split(" ")
         self.assertEqual(top, ["#FF0000", "#FFFF00", "#00FF00", "#00FFFF",
                                "#0000FF", "#FF00FF", "#FF0000"])
 
@@ -139,37 +150,46 @@ class GradientModelTests(unittest.TestCase):
                 self.assertEqual(r, g)
                 self.assertEqual(g, b)
 
-    def test_square_rows_match_the_per_pixel_function_exactly(self):
+    def test_field_data_matches_the_per_pixel_function_exactly(self):
         # Dyadic sizes, hues and values keep every float operation exact, so
-        # the fast row builder must agree with gradient_square_colour bit for bit.
+        # the fast payload builder must agree with gradient_square_colour bit
+        # for bit — this is the pixel data Tk is handed.
         w, h = 9, 5
         for value in (1.0, 0.75, 0.5, 0.25, 0.0):
-            rows = v2.gradient_square_rows(value, w, h)
+            rows = v2.ppm_pixels(v2.gradient_square_ppm(value, w, h), w, h)
             self.assertEqual(len(rows), h)
             for y, row in enumerate(rows):
-                cells = row[1:-1].split(" ")
+                cells = row.split(" ")
                 self.assertEqual(len(cells), w)
                 for x, cell in enumerate(cells):
                     self.assertEqual(cell, v2.gradient_square_colour(x, y, value, w, h),
                                      f"value={value} x={x} y={y}")
 
-    def test_square_rows_are_valid_photo_image_data(self):
-        rows = v2.gradient_square_rows(0.6, 16, 8)
-        for row in rows:
-            self.assertTrue(row.startswith("{") and row.endswith("}"))
-            for colour in row[1:-1].split(" "):
-                self.assertEqual(v2.normalise_hex_colour(colour), colour)
+    def test_field_data_is_a_valid_p6_image(self):
+        data = v2.gradient_square_ppm(0.6, 16, 8)
+        self.assertTrue(data.startswith(b"P6\n16 8\n255\n"))
+        self.assertEqual(len(data), len(v2.ppm_header(16, 8)) + 16 * 8 * 3)
+        # No 8-bit RGB value may be mangled by the encoding: every byte of the
+        # body has to survive the trip, including the zeroes.
+        self.assertEqual(data.count(b"\x00"), sum(1 for byte in data[13:] if byte == 0))
 
-    def test_square_rows_cover_the_full_size(self):
-        rows = v2.gradient_square_rows(0.6)
+    def test_field_data_covers_the_full_size(self):
+        data = v2.gradient_square_ppm(0.6)
+        rows = v2.ppm_pixels(data, v2.GRADIENT_WIDTH, v2.GRADIENT_HEIGHT)
         self.assertEqual(len(rows), v2.GRADIENT_HEIGHT)
-        self.assertEqual(len(rows[0][1:-1].split(" ")), v2.GRADIENT_WIDTH)
+        self.assertEqual(len(rows[0].split(" ")), v2.GRADIENT_WIDTH)
+
+    def test_ppm_pixels_rejects_foreign_data(self):
+        with self.assertRaises(ValueError):
+            v2.ppm_pixels(b"P6\n4 4\n255\n" + b"\x00" * 48, 5, 5)
+        with self.assertRaises(ValueError):
+            v2.ppm_pixels(b"not an image", 1, 1)
 
     def test_shade_strip_runs_white_to_black(self):
         h = 5
-        rows = v2.shade_strip_rows(4, h)
+        rows = v2.ppm_pixels(v2.shade_strip_ppm(4, h), 4, h)
         self.assertEqual(len(rows), h)
-        colours = [row[1:-1].split(" ") for row in rows]
+        colours = [row.split(" ") for row in rows]
         for row in colours:
             self.assertEqual(len(set(row)), 1)          # each row is one shade
             self.assertEqual(len(row), 4)
@@ -179,10 +199,11 @@ class GradientModelTests(unittest.TestCase):
         self.assertEqual(colours[3][0], "#404040")
         self.assertEqual(colours[4][0], "#000000")
 
-    def test_shade_strip_colour_matches_the_rows(self):
+    def test_shade_strip_colour_matches_the_pixel_data(self):
+        rows = v2.ppm_pixels(v2.shade_strip_ppm(v2.HUE_STRIP_WIDTH, v2.GRADIENT_HEIGHT),
+                             v2.HUE_STRIP_WIDTH, v2.GRADIENT_HEIGHT)
         for y in (0, 13, 79, v2.GRADIENT_HEIGHT - 1):
-            row = v2.shade_strip_rows(v2.HUE_STRIP_WIDTH, v2.GRADIENT_HEIGHT)[y]
-            self.assertEqual(row[1:-1].split(" ")[0], v2.shade_strip_colour(y))
+            self.assertEqual(rows[y].split(" ")[0], v2.shade_strip_colour(y))
 
 
 class CustomPaletteStorageTests(unittest.TestCase):
@@ -437,18 +458,35 @@ class _StubCanvas(_StubWidget):
 
 
 class _StubPhotoImage:
-    """Stands in for ``tk.PhotoImage``; records the pixel data it is fed."""
+    """Stands in for ``tk.PhotoImage``; records the image data it is given.
+
+    Only the calls the app makes are modelled: constructing with a size, and
+    ``configure(data=..., format=...)`` to paint pixels.
+    """
+
+    _counter = 0
 
     def __init__(self, master=None, **kwargs):
+        _StubPhotoImage._counter += 1
         self.master = master
+        self.name = f"pyimage{_StubPhotoImage._counter}"
         self.kw = dict(kwargs)
-        self.puts = []
+        self.paints = []          # (data, format) pairs, in order
+        self.data = kwargs.get("data")
+        self.format = kwargs.get("format")
 
-    def put(self, data, *args, **kwargs):
-        self.puts.append(data)
+    def configure(self, **kwargs):
+        if "data" in kwargs or "format" in kwargs:
+            self.data = kwargs.get("data", self.data)
+            self.format = kwargs.get("format", self.format)
+            self.paints.append((self.data, self.format))
+        self.kw.update({k: v for k, v in kwargs.items() if k not in ("data", "format")})
+
+    config = configure
 
     def blank(self):
-        self.puts.clear()
+        self.data = None
+        del self.paints[:]
 
     def width(self):
         return self.kw.get("width", 1)
@@ -573,10 +611,98 @@ class WidgetTests(unittest.TestCase):
 
     def test_picker_paints_the_colour_field_and_the_shade_strip(self):
         picker = self._picker()
-        expected_square = "{" + " ".join(self.mod.gradient_square_rows(1.0, 11, 11)) + "}"
-        expected_strip = "{" + " ".join(self.mod.shade_strip_rows(3, 11)) + "}"
-        self.assertEqual(picker._square_image.puts, [expected_square])
-        self.assertEqual(picker._strip_image.puts, [expected_strip])
+        self.assertEqual(picker._square_image.paints,
+                         [(self.mod.gradient_square_ppm(1.0, 11, 11), "ppm")])
+        self.assertEqual(picker._strip_image.paints,
+                         [(self.mod.shade_strip_ppm(3, 11), "ppm")])
+        self.assertIsNone(picker.last_paint_error)
+
+    def test_the_field_is_painted_with_real_image_data_not_a_colour_list(self):
+        """A nested list of ``#RRGGBB`` names looks right and is rejected by
+        Tk ("can't parse color \"#FF0000 #FF0000\"": the photo parser treats a
+        leading ``#`` as a comment), so the pixels must travel as P6 data."""
+        picker = self._picker()
+        data, image_format = picker._square_image.paints[-1]
+        self.assertEqual(image_format, "ppm")
+        self.assertIsInstance(data, bytes)
+        self.assertTrue(data.startswith(b"P6\n11 11\n255\n"))
+        self.assertNotIn(b"#", data)
+        self.assertEqual(len(data), len(self.mod.ppm_header(11, 11)) + 11 * 11 * 3)
+        rows = self.mod.ppm_pixels(data, 11, 11)
+        self.assertEqual(rows[0].split(" ")[0], "#FF0000")
+        for y, row in enumerate(rows):
+            for x, cell in enumerate(row.split(" ")):
+                self.assertEqual(cell, self.mod.gradient_square_colour(x, y, 1.0, 11, 11))
+
+    def test_the_colour_being_held_is_shown_in_the_field(self):
+        """The request that started this: the current colour has to be visible
+        in the gradient box itself, both as a swatch and under the marker."""
+        picked = []
+        picker = self._picker(on_pick=picked.append)
+        sx0, sy0, sx1, sy1 = picker.square_box
+        swatch = picker.swatch_box
+        self.assertTrue(sx0 < swatch[0] and swatch[2] < sx1)      # inside the field
+        self.assertTrue(sy0 < swatch[1] and swatch[3] < sy1)
+        self.assertEqual(picker.canvas.items[picker._swatch_item]["fill"], "#FF0000")
+        self.assertEqual(picker.canvas.items[picker._marker_fill]["fill"], "#FF0000")
+
+        picker.canvas.press(sx0 + 5, sy0 + 5)
+        colour = self.mod.gradient_square_colour(5, 5, 1.0, 11, 11)
+        self.assertEqual(picker.selected_colour, colour)
+        self.assertEqual(picker.canvas.items[picker._swatch_item]["fill"], colour)
+        self.assertEqual(picker.canvas.items[picker._marker_fill]["fill"], colour)
+
+        picker.set_selected("#123456")
+        self.assertEqual(picker.canvas.items[picker._swatch_item]["fill"], "#123456")
+        self.assertEqual(picker.canvas.items[picker._marker_fill]["fill"], "#123456")
+
+    def test_the_marker_follows_the_colour_and_the_shade_together(self):
+        picker = self._picker(width=11, height=11)
+        picker.set_selected("#80FF00")               # a saturated green-yellow
+        dot = picker.canvas.items[picker._marker_fill]["coords"]
+        ring = picker.canvas.items[picker._shade_marker_outer]["coords"]
+        self.assertEqual(dot, [ring[0] + 2, ring[1] + 2, ring[2] - 2, ring[3] - 2])
+        hue, saturation = self.mod.hex_to_hsv("#80FF00")[:2]
+        sx0, sy0 = picker.square_box[0], picker.square_box[1]
+        mx, my = self.mod.hs_to_point(hue, saturation, 11, 11)
+        self.assertAlmostEqual(ring[0], sx0 + mx - picker.MARKER_R)
+        self.assertAlmostEqual(ring[1], sy0 + my - picker.MARKER_R)
+        self.assertEqual(picker.canvas.items[picker._swatch_item]["fill"], "#80FF00")
+
+    def test_clicking_the_swatch_leaves_the_colour_alone(self):
+        picked = []
+        picker = self._picker(width=64, height=48, on_pick=picked.append)
+        self.assertTrue(picker._swatch_clickable)
+        swatch = picker.swatch_box
+        picker.canvas.press((swatch[0] + swatch[2]) // 2, (swatch[1] + swatch[3]) // 2)
+        self.assertEqual(picked, [])
+        self.assertIsNone(picker.selected_colour)
+
+    def test_clicking_the_field_gives_exactly_the_clicked_pixel(self):
+        """The field is drawn at the held shade; clicking it picks the pixel's
+        own colour and takes the brightness to full (Paint does the same), so
+        what you click is what you get."""
+        picked = []
+        picker = self._picker(on_pick=picked.append)
+        hx0, hy0 = picker.hue_box[0], picker.hue_box[1]
+        picker.canvas.press(hx0 + 1, hy0 + 8)        # darken first
+        self.assertLess(picker.hsv[2], 0.5)
+        sx0, sy0 = picker.square_box[0], picker.square_box[1]
+        picker.canvas.press(sx0 + 3, sy0 + 2)
+        self.assertEqual(picker.hsv[2], 1.0)
+        self.assertEqual(picked[-1], self.mod.gradient_square_colour(3, 2, 1.0, 11, 11))
+        self.assertEqual(picker.canvas.items[picker._swatch_item]["fill"], picked[-1])
+
+    def test_a_paint_failure_is_recorded_not_swallowed(self):
+        picker = self._picker()
+        boom = self.mod.tk.TclError("no display")
+
+        def refuse(**kwargs):
+            raise boom
+
+        picker._square_image.configure = refuse
+        picker._render_square()
+        self.assertIn("no display", picker.last_paint_error)
 
     def test_clicking_the_square_reports_the_colour_under_the_pointer(self):
         picked = []
@@ -602,21 +728,49 @@ class WidgetTests(unittest.TestCase):
         self.assertEqual(len(picked), 2)
         self.assertEqual(picked[-1], picker.selected_colour)
 
-    def test_dragging_the_shade_strip_darkens_the_whole_field(self):
+    def test_dragging_the_shade_strip_darkens_the_colour_and_the_field(self):
         picked = []
         picker = self._picker(width=11, height=13, on_pick=picked.append)
         hx0, hy0 = picker.hue_box[0], picker.hue_box[1]
-        renders_before = len(picker._square_image.puts)
+        renders_before = len(picker._square_image.paints)
         picker.canvas.press(hx0 + 1, hy0 + 4)        # value = 1 - 4/12
         shade = self.mod.value_at(4, 13)
         self.assertEqual(picked[-1], "#AA0000")      # hue/sat kept, darker red
-        self.assertEqual(len(picker._square_image.puts), renders_before + 1)
-        expected = "{" + " ".join(self.mod.gradient_square_rows(shade, 11, 13)) + "}"
-        self.assertEqual(picker._square_image.puts[-1], expected)
-        # ...and the field's top-left corner now reports the darker red too.
-        sx0, sy0 = picker.square_box[0], picker.square_box[1]
-        picker.canvas.press(sx0, sy0)
-        self.assertEqual(picked[-1], "#AA0000")
+        self.assertEqual(len(picker._square_image.paints), renders_before + 1)
+        self.assertEqual(picker._square_image.paints[-1],
+                         (self.mod.gradient_square_ppm(shade, 11, 13), "ppm"))
+        self.assertEqual(picker.selected_colour, "#AA0000")
+
+    def test_the_field_never_darkens_past_the_readable_floor(self):
+        """The reported bug: with a near-black colour the field was a void
+        (and, before that, an empty box). It now stays a readable rainbow
+        however dark the colour being edited is."""
+        picked = []
+        picker = self._picker(on_pick=picked.append)
+        picker.set_selected("#000000")               # the darkest there is
+        data, _ = picker._square_image.paints[-1]
+        rows = self.mod.ppm_pixels(data, 11, 11)
+        shade = self.mod.rendered_shade(0.0)
+        self.assertEqual(picker.field_shade, shade)
+        for y, row in enumerate(rows):
+            for x, cell in enumerate(row.split(" ")):
+                self.assertEqual(cell, self.mod.gradient_square_colour(x, y, shade, 11, 11))
+        self.assertNotEqual(rows[0].split(" ")[0], "#000000")   # not a black box
+        self.assertEqual(picker.selected_colour, "#000000")     # exact colour kept
+
+    def test_dragging_below_the_floor_does_not_repaint_the_field(self):
+        # Once the floor is reached the field cannot get any darker, so no
+        # further pixel data is sent to Tk while the drag continues.
+        picker = self._picker(width=11, height=13)
+        hx0, hy0 = picker.hue_box[0], picker.hue_box[1]
+        picker.canvas.press(hx0 + 1, hy0 + 10)       # value = 1/6: under the floor
+        renders = len(picker._square_image.paints)
+        picker.canvas.drag(hx0 + 1, hy0 + 11)        # even darker: same render
+        self.assertEqual(len(picker._square_image.paints), renders)
+        self.assertLess(picker.hsv[2], self.mod.FIELD_MIN_SHADE)
+        self.assertEqual(picker._square_image.paints[-1],
+                         (self.mod.gradient_square_ppm(self.mod.FIELD_MIN_SHADE, 11, 13),
+                          "ppm"))
 
     def test_clicks_in_the_margin_are_ignored(self):
         picked = []
@@ -677,6 +831,32 @@ class WidgetTests(unittest.TestCase):
         self.assertEqual(editor.triple(), ("#102030", "#405060", "#708090"))
         self.assertEqual(editor.name_var.get(), "Mine")
         self.assertEqual(editor.hex_var.get(), "#102030")   # primary selected first
+        self.assertEqual(editor._paint_hint.cget("text"), "")   # nothing to report
+
+    def test_editor_reports_a_gradient_that_could_not_be_painted(self):
+        """The box-must-not-silently-stay-empty rule, at the editor level."""
+        original = self.mod.ColourGradientPicker._paint
+
+        def refuse(self, image, data):
+            self.last_paint_error = "can't parse color"
+
+        self.mod.ColourGradientPicker._paint = refuse
+        try:
+            editor, _ = self._editor(initial=("#102030", "#405060", "#708090"))
+        finally:
+            self.mod.ColourGradientPicker._paint = original
+        self.assertIn("can't parse color", editor._paint_hint.cget("text"))
+        self.assertEqual(editor.triple(), ("#102030", "#405060", "#708090"))
+
+    def test_a_later_paint_failure_is_reported_while_picking(self):
+        editor, _ = self._editor()
+        self.assertEqual(editor._paint_hint.cget("text"), "")
+        editor.picker.last_paint_error = "no display"
+        editor._picked("#00FF00")
+        self.assertIn("no display", editor._paint_hint.cget("text"))
+        editor.picker.last_paint_error = None
+        editor._picked("#00FF00")
+        self.assertEqual(editor._paint_hint.cget("text"), "")
 
     def test_picking_fills_the_selected_role(self):
         editor, _ = self._editor(initial=("#102030", "#405060", "#708090"))

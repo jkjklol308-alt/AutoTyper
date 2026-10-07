@@ -89,6 +89,8 @@ python -m unittest test_auto_typer.py test_custom_colours.py test_update_checker
 
 ![The Paint-style gradient used by the custom colour picker](docs/colour-gradient.png)
 
+Both panels above are drawn from the app's own colour maths: while you hold a colour the field is painted at its brightness, the current colour is shown as a swatch in the field's bottom-left corner and by the filled dot inside the marker, and when you edit a near-black colour the field stops darkening at `FIELD_MIN_SHADE` (0.4) so it stays a readable rainbow instead of turning into a black box — the swatch and the hex box still show the exact colour.
+
 The header keeps a single **⚙ Settings** button — palettes, window behaviour and updates all live inside it:
 
 - **Custom “UI colour” section**: press **🎨 New colours…** to open the editor, which uses the *Microsoft Paint “Edit colours” style gradient picker* — a big colour field (the whole rainbow left to right, pure colours fading to greyscale towards the bottom, drawn at the current shade) beside a white‑to‑black shade strip. Click or **drag** anywhere in the field to pick the colour itself — the colour you have chosen is always the pixel under the marker — then slide the strip to lighten or darken it; every intermediate colour is reachable, not just a fixed set of swatches.

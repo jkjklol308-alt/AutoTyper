@@ -32,12 +32,12 @@ def _rgba(colour: str):
     return tuple(int(colour[i:i + 2], 16) for i in (0, 2, 4))
 
 
-def rows_to_image(rows, width, height) -> Image.Image:
-    """Turn ``{"#RRGGBB ..."}`` PhotoImage rows into a PIL image."""
+def ppm_to_image(data, width, height) -> Image.Image:
+    """Turn the app's P6 PPM bytes into a PIL image."""
     image = Image.new("RGB", (width, height))
     pixels = image.load()
-    for y, row in enumerate(rows):
-        for x, colour in enumerate(row.strip("{}").split()):
+    for y, row in enumerate(at.ppm_pixels(data, width, height)):
+        for x, colour in enumerate(row.split(" ")):
             pixels[x, y] = _rgba(colour)
     return image
 
@@ -47,8 +47,8 @@ def draw_picker(picked, value=1.0, variant="current"):
     width = PAD * 2 + W + GAP + STRIP_W
     height = PAD * 2 + H
     canvas = Image.new("RGB", (width, height), (255, 255, 255))
-    field = rows_to_image(at.gradient_square_rows(value, W, H), W, H)
-    strip = rows_to_image(at.shade_strip_rows(STRIP_W, H), STRIP_W, H)
+    field = ppm_to_image(at.gradient_square_ppm(value, W, H), W, H)
+    strip = ppm_to_image(at.shade_strip_ppm(STRIP_W, H), STRIP_W, H)
     canvas.paste(field, (PAD, PAD))
     canvas.paste(strip, (PAD + W + GAP, PAD))
     draw = ImageDraw.Draw(canvas)

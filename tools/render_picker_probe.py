@@ -81,29 +81,45 @@ def read_back_grid(image, width, height, step: int = 2):
 # ---------------------------------------------------------------------------
 # Painting experiments: which calls can a real Tk actually honour?
 # ---------------------------------------------------------------------------
+def field_rows(value: float, width: int, height: int) -> list:
+    """The field as rows of ``#RRGGBB`` names, straight from the model."""
+    return [" ".join(at.gradient_square_colour(x, y, value, width, height)
+                     for x in range(width))
+            for y in range(height)]
+
+
+def field_triplets(value: float, width: int, height: int):
+    """The field as ``(r, g, b)`` integers."""
+    for y in range(height):
+        for x in range(width):
+            colour = at.gradient_square_colour(x, y, value, width, height)
+            yield tuple(int(colour[i:i + 2], 16) for i in (1, 3, 5))
+
+
 def colour_list(value: float, width: int, height: int) -> str:
-    """The payload the picker sends today: one nested colour-name list."""
-    return "{" + " ".join(at.gradient_square_rows(value, width, height)) + "}"
+    """The payload the picker *used* to send: one nested colour-name list.
+
+    Kept as a negative control: a real Tk rejects it ("can't parse color
+    \"#FF0000 #FF0000\"") because the photo parser sees a leading ``#`` as a
+    Tcl comment. If this ever starts working the reason for the PPM route is
+    worth revisiting.
+    """
+    return "{" + " ".join(field_rows(value, width, height)) + "}"
 
 
 def row_list(value: float, width: int, height: int) -> list:
-    """One single-row colour list per scanline."""
-    return at.gradient_square_rows(value, width, height)
+    """One single-row colour list per scanline (the other old approach)."""
+    return field_rows(value, width, height)
 
 
 def ppm_bytes(value: float, width: int, height: int, binary: bool = True) -> bytes:
     """The same field as PPM image data (P6 binary or P3 ASCII)."""
-    header = f"P{6 if binary else 3}\n{width} {height}\n255\n"
-    if not binary:
-        body = "\n".join(" ".join(cell.lstrip("#") for cell in
-                                  row.strip("{}").split())
-                         for row in at.gradient_square_rows(value, width, height))
-        return (header + body).encode("ascii")
-    raw = bytearray()
-    for row in at.gradient_square_rows(value, width, height):
-        for cell in row.strip("{}").split():
-            raw += bytes.fromhex(cell.lstrip("#"))
-    return header.encode("ascii") + bytes(raw)
+    if binary:
+        return at.gradient_square_ppm(value, width, height)
+    header = f"P3\n{width} {height}\n255\n"
+    body = "\n".join(" ".join(str(part) for part in triplet)
+                     for triplet in field_triplets(value, width, height))
+    return (header + body).encode("ascii")
 
 
 def try_paint(root, label, width, height, put) -> dict:
@@ -135,6 +151,17 @@ def experiment_matrix(root) -> list:
         root, "colour-list, one row per put (-to)", big_w, big_h,
         lambda image: [image.tk.call(image.name, "put", row, "-to", 0, y)
                        for y, row in enumerate(row_list(value, big_w, big_h))]))
+
+    # What the widget itself now does: hand Tk raw P6 data via configure.
+    results.append(try_paint(
+        root, "ppm P6 (configure -data, as shipped)", big_w, big_h,
+        lambda image: image.configure(data=at.gradient_square_ppm(value, big_w, big_h),
+                                      format="ppm")))
+    results.append(try_paint(
+        root, "shade strip P6 (configure -data, as shipped)",
+        at.HUE_STRIP_WIDTH, big_h,
+        lambda image: image.configure(data=at.shade_strip_ppm(at.HUE_STRIP_WIDTH, big_h),
+                                      format="ppm")))
 
     for binary in (True, False):
         results.append(try_paint(
@@ -222,7 +249,7 @@ def thumbnail_base64(image, scale: int, colours: int = 32) -> str:
 def collect_images(picker, out, images: dict) -> None:
     """Thumbnails of what Tk stored, what the model wanted, and the window."""
     try:
-        value = picker.hsv[2]
+        value = picker.field_shade
         grid = read_back_grid(picker._square_image, picker.width, picker.height)
         images["tk_stored_field_half"] = thumbnail_base64(
             image_from_pixels(grid, picker.width, picker.height), 2)
@@ -269,26 +296,51 @@ def main(argv=None):
         picker.update()
         root.update()
 
-        value = picker.hsv[2]
+        # The field is drawn at the *held shade*, floored, not at the raw value.
+        shade = picker.field_shade
         actual = read_back(picker._square_image, SAMPLE_POINTS)
-        expected = {f"{x},{y}": at.gradient_square_colour(x, y, value)
+        expected = {f"{x},{y}": at.gradient_square_colour(x, y, shade)
                     for x, y in SAMPLE_POINTS}
         mismatches = {point: [actual[point], expected[point]]
                       for point in expected if actual[point] != expected[point]}
+        dark = [point for point, colour in actual.items()
+                if at.normalise_hex_colour(colour) in (None, "#000000")]
+        swatch = picker.swatch_box
+        field = picker.square_box
         report.update({
-            "shade": round(value, 4),
+            "held_value": round(picker.hsv[2], 4),
+            "field_shade": round(shade, 4),
+            "field_paint_error": picker.last_paint_error,
             "field_size": [picker.width, picker.height],
             "field_actual": actual,
             "field_mismatches": mismatches,
             "field_mismatch_count": len(mismatches),
+            "field_black_samples": dark,           # empty box would be all of them
             "shade_strip_actual": read_back(picker._strip_image, ((0, 0), (0, 159))),
+            "swatch_inside_field": (field[0] <= swatch[0] and field[1] <= swatch[1]
+                                    and swatch[2] <= field[2] and swatch[3] <= field[3]),
+            "swatch_fill": str(picker.canvas.itemcget(picker._swatch_item, "fill")),
+            "marker_fill": str(picker.canvas.itemcget(picker._marker_fill, "fill")),
+            "selected_colour": picker.selected_colour,
         })
-        # Re-run the exact call the widget makes so a silent failure shows up.
+        # Re-run the exact call this widget used to make, as a live negative.
         try:
-            picker._square_image.put(colour_list(value, picker.width, picker.height))
+            picker._square_image.put(colour_list(shade, picker.width, picker.height))
             report["widget_put_replay"] = "ok"
         except Exception as err:
             report["widget_put_replay"] = f"{type(err).__name__}: {err}"
+
+        # Selecting a colour must move the markers and recolour the swatch.
+        try:
+            picker.set_selected("#123456")
+            probe = {
+                "swatch_fill": str(picker.canvas.itemcget(picker._swatch_item, "fill")),
+                "marker_fill": str(picker.canvas.itemcget(picker._marker_fill, "fill")),
+                "paint_error": picker.last_paint_error,
+            }
+            report["after_set_selected_123456"] = probe
+        except Exception as err:
+            report["after_set_selected_123456"] = f"{type(err).__name__}: {err}"
 
         report["paint_experiments"] = experiment_matrix(root)
         report["ppm_construct"] = rebuild_from_ppm(
@@ -296,7 +348,7 @@ def main(argv=None):
 
         report["screenshot"] = screenshot(editor, out / "picker.png")
         collect_images(picker, out, images)
-        if mismatches:
+        if mismatches or picker.last_paint_error:
             exit_code = 1
     except Exception:
         report["fatal"] = traceback.format_exc()
@@ -315,9 +367,11 @@ def main(argv=None):
 
     if exit_code:
         print(f"FAIL: {report['field_mismatch_count']} of {len(SAMPLE_POINTS)} "
-              f"sampled pixels do not match the model — the field did not paint")
+              f"sampled pixels do not match the model "
+              f"(paint error: {report.get('field_paint_error')!r})")
     else:
-        print(f"OK: all {len(SAMPLE_POINTS)} sampled pixels match")
+        print(f"OK: all {len(SAMPLE_POINTS)} sampled pixels match at shade "
+              f"{report['field_shade']}; swatch shows {report['selected_colour']}")
     return exit_code
 
 
