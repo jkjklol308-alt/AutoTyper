@@ -89,7 +89,7 @@ python -m unittest test_auto_typer.py test_custom_colours.py test_update_checker
 
 The header keeps a single **⚙ Settings** button — palettes, window behaviour and updates all live inside it:
 
-- **Custom “UI colour” section**: press **🎨 New colours…** to open the editor, which uses the *Microsoft Paint “Edit colours” style gradient picker* — a big shade square (white → pure colour left to right, bright → black top to bottom) beside a rainbow hue strip. Click or **drag** anywhere in the gradient to reach any shade of the current hue, and slide the strip to sweep through hues; every intermediate colour is reachable, not just a fixed set of swatches.
+- **Custom “UI colour” section**: press **🎨 New colours…** to open the editor, which uses the *Microsoft Paint “Edit colours” style gradient picker* — a big colour field (the whole rainbow left to right, pure colours fading to greyscale towards the bottom, drawn at the current shade) beside a white‑to‑black shade strip. Click or **drag** anywhere in the field to pick the colour itself — the colour you have chosen is always the pixel under the marker — then slide the strip to lighten or darken it; every intermediate colour is reachable, not just a fixed set of swatches.
 - Choose a **Primary**, **Accent** and **Background** colour (drag in the gradient or type `#RRGGBB`), watch the live preview, give the set a name, and **Save colours**.
 - Saved palettes appear in the palette grid marked with a ★, are applied instantly, survive restarts (stored in `~/.autotyper_settings.json`; settings from earlier releases under the old file name are picked up automatically), and can be re-opened for editing by double-clicking a card or pressing **Edit selected**. **Delete selected** removes one; built-in palettes cannot be deleted. Up to 16 custom palettes are kept.
 
@@ -100,4 +100,4 @@ pip install pyinstaller pynput
 pyinstaller AutoTyper.spec --noconfirm     # -> dist/AutoTyper.exe
 ```
 
-Pushing a tag that matches `APP_VERSION` (for example `v1.1.0`) makes GitHub Actions run the tests, build the executable and attach it to a release automatically — see `.github/workflows/release.yml`.
+Pushing a tag that matches `APP_VERSION` (for example `v1.1.1`) makes GitHub Actions run the tests, build the executable and attach it to a release automatically — see `.github/workflows/release.yml`.

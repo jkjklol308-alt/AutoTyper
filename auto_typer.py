@@ -29,11 +29,12 @@ A next-generation human typing simulator implementing:
      Python script. A packaged build swaps itself in and restarts
      automatically (keeping a .old backup); a build running from source saves
      the executable next to the user's other downloads.
- 10. Custom UI Colours (v1.1.0): a Microsoft-Paint style gradient colour
-     picker — a shade/saturation gradient square plus a rainbow hue strip —
-     that lets you click or drag to any colour, choose a primary, accent and
-     background colour, name the result and save it alongside the built-in
-     palettes.
+ 10. Custom UI Colours (v1.1.0, reworked in v1.1.1): a Microsoft-Paint style
+     gradient colour picker — a full colour field (rainbow of hues across,
+     saturation fading down, drawn at the current shade) plus a white-to-black
+     shade strip — that lets you click or drag to any colour, choose a
+     primary, accent and background colour, name the result and save it
+     alongside the built-in palettes.
 
 Usage:
     python auto_typer.py --benchmark --wpm 110 --mode net --coding-mode --file code.pas
@@ -72,7 +73,7 @@ try:
 except ImportError:
     tk = messagebox = ttk = None
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 APP_NAME = "AutoTyper"
 GITHUB_REPO = "jkjklol308-alt/AutoTyper"
 EXE_ASSET_NAME = "AutoTyper.exe"
@@ -2212,10 +2213,10 @@ def _palette_colours(name: str, definitions: Optional[Dict[str, Tuple[str, str, 
 # gradient geometry, the colour ramps and the saved-palette validation can be
 # unit tested headlessly. The Tk widgets further down only render this model.
 #
-# The layout mirrors Microsoft Paint's "Edit colours" dialog: one big
-# gradient square (left->right = saturation, top->bottom = brightness, i.e.
-# every shade of the current hue) next to a thin rainbow strip that picks the
-# hue itself.
+# The layout mirrors Microsoft Paint's "Edit colours" dialog: one big colour
+# field (left->right = hue, top->bottom = saturation, drawn at the current
+# brightness so the picked colour is always the pixel under the marker) next
+# to a thin white->black strip that picks the shade (brightness) itself.
 
 GRADIENT_WIDTH = 240         # px across the saturation axis of the square
 GRADIENT_HEIGHT = 160        # px down the brightness ("shade") axis
@@ -2274,105 +2275,123 @@ def hex_to_hsv(colour) -> Optional[Tuple[float, float, float]]:
     return colorsys.rgb_to_hsv(r, g, b)
 
 
-def point_to_sv(x: float, y: float, width: int = GRADIENT_WIDTH,
+def point_to_hs(x: float, y: float, width: int = GRADIENT_WIDTH,
                 height: int = GRADIENT_HEIGHT) -> Tuple[float, float]:
-    """Saturation/brightness (each 0..1) at pixel ``(x, y)`` of the gradient.
+    """Hue/saturation (each 0..1) at pixel ``(x, y)`` of the colour field.
 
-    Mirrors the Paint gradient square: white -> pure hue left to right
-    (saturation) and bright -> black top to bottom (brightness/value).
+    Mirrors the Paint gradient square: the whole rainbow runs left to right
+    (hue) and the pure colours fade to greyscale top to bottom (saturation).
+    Brightness lives on the separate shade strip, not in the square.
     """
     width = max(2, int(width))
     height = max(2, int(height))
     return (clamp_unit(x / (width - 1)), clamp_unit(1.0 - y / (height - 1)))
 
 
-def sv_to_point(saturation: float, value: float, width: int = GRADIENT_WIDTH,
+def hs_to_point(hue: float, saturation: float, width: int = GRADIENT_WIDTH,
                 height: int = GRADIENT_HEIGHT) -> Tuple[float, float]:
-    """Pixel of the gradient square showing ``(saturation, value)``."""
+    """Pixel of the colour field showing ``(hue, saturation)``."""
     width = max(2, int(width))
     height = max(2, int(height))
-    return (clamp_unit(saturation) * (width - 1),
-            (1.0 - clamp_unit(value)) * (height - 1))
+    return (clamp_unit(hue) * (width - 1),
+            (1.0 - clamp_unit(saturation)) * (height - 1))
 
 
-def hue_at(y: float, height: int = GRADIENT_HEIGHT) -> float:
-    """Hue (0..1, red at the top) shown at pixel row ``y`` of the rainbow."""
+def value_at(y: float, height: int = GRADIENT_HEIGHT) -> float:
+    """Brightness (1 at the top .. 0 at the bottom) at row ``y`` of the strip."""
     height = max(2, int(height))
-    return clamp_unit(y / (height - 1))
+    return clamp_unit(1.0 - y / (height - 1))
 
 
-def hue_to_y(hue: float, height: int = GRADIENT_HEIGHT) -> float:
-    """Pixel row of the rainbow strip that shows ``hue``."""
+def value_to_y(value: float, height: int = GRADIENT_HEIGHT) -> float:
+    """Pixel row of the shade strip showing ``value``."""
     height = max(2, int(height))
-    return clamp_unit(hue) * (height - 1)
+    return (1.0 - clamp_unit(value)) * (height - 1)
 
 
-def gradient_square_colour(hue: float, x: float, y: float,
+def gradient_square_colour(x: float, y: float, value: float,
                            width: int = GRADIENT_WIDTH,
                            height: int = GRADIENT_HEIGHT) -> str:
-    """The ``#RRGGBB`` colour painted at pixel ``(x, y)`` of the gradient."""
-    saturation, value = point_to_sv(x, y, width, height)
+    """The ``#RRGGBB`` colour painted at pixel ``(x, y)`` of the field."""
+    hue, saturation = point_to_hs(x, y, width, height)
     return hsv_to_hex(hue, saturation, value)
 
 
-def hue_strip_colour(y: float, height: int = GRADIENT_HEIGHT) -> str:
-    """The fully saturated colour at pixel row ``y`` of the rainbow strip."""
-    return hsv_to_hex(hue_at(y, height), 1.0, 1.0)
+def shade_strip_colour(y: float, height: int = GRADIENT_HEIGHT) -> str:
+    """The greyscale shade at pixel row ``y`` of the white->black strip."""
+    return hsv_to_hex(0.0, 0.0, value_at(y, height))
 
 
-def gradient_square_rows(hue: float, width: int = GRADIENT_WIDTH,
+def _hue_runs(width: int) -> List[Tuple[int, int, int]]:
+    """Contiguous ``(sector, first_column, end_column)`` runs of the rainbow.
+
+    Columns sharing a colorsys sector are rendered together so the row
+    builder stays a handful of list comprehensions instead of a per-pixel
+    branch.
+    """
+    runs: List[Tuple[int, int, int]] = []
+    for x in range(width):
+        scaled = (x / (width - 1)) * 6.0
+        sector = int(scaled) % 6
+        if runs and runs[-1][0] == sector:
+            runs[-1] = (sector, runs[-1][1], x + 1)
+        else:
+            runs.append((sector, x, x + 1))
+    return runs
+
+
+def gradient_square_rows(value: float, width: int = GRADIENT_WIDTH,
                          height: int = GRADIENT_HEIGHT) -> List[str]:
-    """One ``{#RRGGBB ...}`` PhotoImage row per scanline of the gradient.
+    """One ``{#RRGGBB ...}`` PhotoImage row per scanline of the colour field.
 
-    Pixel-for-pixel identical to ``gradient_square_colour``, but computed
-    without a per-pixel function call so dragging the hue strip re-renders
-    the whole square in milliseconds instead of hundreds of them. The
-    pre-computed columns evaluate exactly the expressions ``colorsys`` uses.
+    Pixel-for-pixel identical to ``gradient_square_colour`` but computed
+    without a per-pixel function call, so dragging the shade strip re-renders
+    the whole square in milliseconds. The per-row products evaluate exactly
+    the expressions ``colorsys`` uses.
     """
     width = max(2, int(width))
     height = max(2, int(height))
-    hue = float(hue) % 1.0
-    scaled = hue * 6.0
-    sector = int(scaled) % 6
-    frac = scaled - math.floor(scaled)
-    saturations = [x / (width - 1) for x in range(width)]
-    columns_p = [1.0 - s for s in saturations]
-    columns_q = [1.0 - s * frac for s in saturations]
-    columns_t = [1.0 - s * (1.0 - frac) for s in saturations]
+    v = clamp_unit(value)
+    fracs = []
+    for x in range(width):
+        scaled = (x / (width - 1)) * 6.0
+        fracs.append(scaled - math.floor(scaled))
+    runs = _hue_runs(width)
     hex_byte = _HEX_BYTE
     rows: List[str] = []
     for y in range(height):
-        v = 1.0 - y / (height - 1)
-        p = [v * c for c in columns_p]
-        q = [v * c for c in columns_q]
-        t = [v * c for c in columns_t]
-        full = (v,) * width
-        if sector == 0:
-            channels = zip(full, t, p)
-        elif sector == 1:
-            channels = zip(q, full, p)
-        elif sector == 2:
-            channels = zip(p, full, t)
-        elif sector == 3:
-            channels = zip(p, q, full)
-        elif sector == 4:
-            channels = zip(t, p, full)
-        else:
-            channels = zip(full, p, q)
-        rows.append("{" + " ".join(
-            "#" + hex_byte[round(r * 255)] + hex_byte[round(g * 255)] + hex_byte[round(b * 255)]
-            for r, g, b in channels) + "}")
+        s = 1.0 - y / (height - 1)
+        p = v * (1.0 - s)
+        q = [v * (1.0 - s * f) for f in fracs]
+        t = [v * (1.0 - s * (1.0 - f)) for f in fracs]
+        hex_v = hex_byte[round(v * 255)]
+        hex_p = hex_byte[round(p * 255)]
+        parts = []
+        for sector, first, end in runs:
+            if sector == 0:      # (v, t, p)
+                parts.extend("#" + hex_v + hex_byte[round(c * 255)] + hex_p for c in t[first:end])
+            elif sector == 1:    # (q, v, p)
+                parts.extend("#" + hex_byte[round(c * 255)] + hex_v + hex_p for c in q[first:end])
+            elif sector == 2:    # (p, v, t)
+                parts.extend("#" + hex_p + hex_v + hex_byte[round(c * 255)] for c in t[first:end])
+            elif sector == 3:    # (p, q, v)
+                parts.extend("#" + hex_p + hex_byte[round(c * 255)] + hex_v for c in q[first:end])
+            elif sector == 4:    # (t, p, v)
+                parts.extend("#" + hex_byte[round(c * 255)] + hex_p + hex_v for c in t[first:end])
+            else:                # (v, p, q)
+                parts.extend("#" + hex_v + hex_p + hex_byte[round(c * 255)] for c in q[first:end])
+        rows.append("{" + " ".join(parts) + "}")
     return rows
 
 
-def hue_strip_rows(width: int = HUE_STRIP_WIDTH,
-                   height: int = GRADIENT_HEIGHT) -> List[str]:
-    """``{#RRGGBB ...}`` PhotoImage rows for the rainbow hue strip."""
+def shade_strip_rows(width: int = HUE_STRIP_WIDTH,
+                     height: int = GRADIENT_HEIGHT) -> List[str]:
+    """``{#RRGGBB ...}`` PhotoImage rows for the white->black shade strip."""
     width = max(1, int(width))
     height = max(2, int(height))
     rows: List[str] = []
     for y in range(height):
-        colour = hue_strip_colour(y, height)
+        colour = shade_strip_colour(y, height)
         rows.append("{" + " ".join([colour] * width) + "}")
     return rows
 
@@ -2464,16 +2483,17 @@ _TkToplevel = tk.Toplevel if tk is not None else object
 class ColourGradientPicker(_TkFrame):
     """The Microsoft Paint style colour picker ("Edit colours").
 
-    A big gradient square shows every shade of the current hue at once —
-    white at the top-left, the pure hue at the top-right, black along the
-    bottom — and the rainbow strip beside it selects the hue. Click or drag
-    anywhere on either area: unlike a fixed swatch grid, every intermediate
-    colour is reachable, exactly like Paint's gradient dialog.
+    The big square is the colour field itself: the whole rainbow runs left to
+    right, pure colours fade to greyscale towards the bottom, and the square
+    is drawn at the current shade — so the colour you have picked is always
+    the very pixel sitting under the marker ring. The white-to-black strip
+    beside it is the shade selector: slide it and the whole field darkens or
+    lightens with it. Click or drag anywhere on either area.
     """
 
     PAD = 10          # px of margin around the artwork
-    GAP = 16          # px between the gradient square and the hue strip
-    MARKER_R = 6      # radius of the ring marking the picked shade
+    GAP = 16          # px between the colour field and the shade strip
+    MARKER_R = 6      # radius of the ring marking the picked colour
 
     def __init__(self, master, *, width: int = GRADIENT_WIDTH, height: int = GRADIENT_HEIGHT,
                  hue_width: int = HUE_STRIP_WIDTH, on_pick=None, background: str = "#FFFFFF",
@@ -2499,9 +2519,9 @@ class ColourGradientPicker(_TkFrame):
         self.canvas.pack()
 
         self._square_image = tk.PhotoImage(master=self, width=self.width, height=self.height)
-        self._hue_image = tk.PhotoImage(master=self, width=self.hue_width, height=self.height)
+        self._strip_image = tk.PhotoImage(master=self, width=self.hue_width, height=self.height)
         self.canvas.create_image(pad, pad, image=self._square_image, anchor="nw")
-        self.canvas.create_image(hue_x, pad, image=self._hue_image, anchor="nw")
+        self.canvas.create_image(hue_x, pad, image=self._strip_image, anchor="nw")
 
         sx0, sy0, sx1, sy1 = self.square_box
         hx0, hy0, hx1, hy1 = self.hue_box
@@ -2523,7 +2543,7 @@ class ColourGradientPicker(_TkFrame):
         self.canvas.bind("<Button-1>", self._pointer)
         self.canvas.bind("<B1-Motion>", self._pointer)
 
-        self._render_hue_strip()
+        self._render_strip()
         self._render_square()
         self._move_markers()
 
@@ -2537,30 +2557,30 @@ class ColourGradientPicker(_TkFrame):
     def _render_square(self):
         try:
             self._square_image.put("{" + " ".join(
-                gradient_square_rows(self._hsv[0], self.width, self.height)) + "}")
+                gradient_square_rows(self._hsv[2], self.width, self.height)) + "}")
         except tk.TclError:
             pass  # destroyed mid-drag or no usable display: markers still move
 
-    def _render_hue_strip(self):
+    def _render_strip(self):
         try:
-            self._hue_image.put("{" + " ".join(
-                hue_strip_rows(self.hue_width, self.height)) + "}")
+            self._strip_image.put("{" + " ".join(
+                shade_strip_rows(self.hue_width, self.height)) + "}")
         except tk.TclError:
             pass
 
     def _move_markers(self):
         sx0, sy0 = self.square_box[0], self.square_box[1]
         hx0, hy0, hx1 = self.hue_box[0], self.hue_box[1], self.hue_box[2]
-        x, y = sv_to_point(self._hsv[1], self._hsv[2], self.width, self.height)
+        x, y = hs_to_point(self._hsv[0], self._hsv[1], self.width, self.height)
         cx, cy = sx0 + x, sy0 + y
         r = self.MARKER_R
-        hue_y = hy0 + hue_to_y(self._hsv[0], self.height)
+        strip_y = hy0 + value_to_y(self._hsv[2], self.height)
         try:
             self.canvas.coords(self._shade_marker_outer, cx - r, cy - r, cx + r, cy + r)
             self.canvas.coords(self._shade_marker_inner, cx - r + 2, cy - r + 2,
                                cx + r - 2, cy + r - 2)
-            self.canvas.coords(self._hue_marker_outer, hx0 - 5, hue_y - 5, hx1 + 5, hue_y + 5)
-            self.canvas.coords(self._hue_marker_inner, hx0 - 3, hue_y - 3, hx1 + 3, hue_y + 3)
+            self.canvas.coords(self._hue_marker_outer, hx0 - 5, strip_y - 5, hx1 + 5, strip_y + 5)
+            self.canvas.coords(self._hue_marker_inner, hx0 - 3, strip_y - 3, hx1 + 3, strip_y + 3)
         except tk.TclError:
             pass
 
@@ -2574,20 +2594,20 @@ class ColourGradientPicker(_TkFrame):
         slack = self.PAD / 2.0
         hue, saturation, value = self._hsv
         if sx0 - slack <= x <= sx1 + slack and sy0 - slack <= y <= sy1 + slack:
-            saturation, value = point_to_sv(x - sx0, y - sy0, self.width, self.height)
+            hue, saturation = point_to_hs(x - sx0, y - sy0, self.width, self.height)
         elif hx0 - slack <= x <= hx1 + slack and hy0 - slack <= y <= hy1 + slack:
-            hue = hue_at(y - hy0, self.height)
+            value = value_at(y - hy0, self.height)
         else:
             return  # clicked the margin: keep the current colour
         self._apply_hsv((hue, saturation, value))
 
     def _apply_hsv(self, hsv: Tuple[float, float, float], notify: bool = True):
         hue, saturation, value = (clamp_unit(part) for part in hsv)
-        hue_changed = hue != self._hsv[0]
+        value_changed = value != self._hsv[2]
         self._hsv = (hue, saturation, value)
         self.selected_colour = hsv_to_hex(hue, saturation, value)
-        if hue_changed:
-            self._render_square()
+        if value_changed:
+            self._render_square()  # the field is drawn at the current shade
         self._move_markers()
         if notify and self._on_pick is not None:
             self._on_pick(self.selected_colour)
@@ -2595,9 +2615,9 @@ class ColourGradientPicker(_TkFrame):
     def set_selected(self, colour: Optional[str]):
         """Point the markers at ``colour`` without firing the callback.
 
-        Greys and black keep the hue the square already shows (Paint behaves
-        the same way), so choosing a neutral background does not scramble the
-        gradient the user was browsing.
+        Greys and black keep the hue/saturation the field already shows
+        (Paint behaves the same way), so choosing a neutral background does
+        not scramble the gradient the user was browsing.
         """
         hsv = hex_to_hsv(colour)
         if hsv is None:
@@ -2605,7 +2625,7 @@ class ColourGradientPicker(_TkFrame):
             return
         hue, saturation, value = hsv
         if saturation == 0.0 or value == 0.0:
-            hue = self._hsv[0]
+            hue, saturation = self._hsv[0], self._hsv[1]
         self._apply_hsv((hue, saturation, value), notify=False)
         self.selected_colour = normalise_hex_colour(colour)
 
@@ -2651,8 +2671,8 @@ class CustomPaletteEditor(_TkToplevel):
         tk.Label(body, text="Custom UI Colour", bg=c["background"], fg=c["primary"],
                  font=("Segoe UI", 16, "bold")).pack(anchor="w")
         tk.Label(body,
-                 text="Drag in the gradient for lighter and darker shades, slide the rainbow strip\n"
-                      "to change the hue, then name the set and save it with the other palettes.",
+                 text="Drag in the colour gradient to pick a hue and its intensity, slide the shade\n"
+                      "strip for lighter and darker, then name the set and save it with the palettes.",
                  bg=c["background"], fg=c["muted"], font=("Segoe UI", 9),
                  justify="left").pack(anchor="w", pady=(2, 12))
 
@@ -3309,8 +3329,8 @@ class AutoTyperApp(_TkBase):
                 saved = len(self.custom_palettes)
                 self._custom_hint.configure(
                     text=("Design your own palette on the Microsoft-Paint style colour gradient: "
-                          "drag for a shade, slide the rainbow strip for the hue, then name it and save.\n"
-                          f"Saved custom palettes: {saved} of {MAX_CUSTOM_PALETTES}"
+                          "drag the colour field for hue and intensity, slide the strip for the shade,\n"
+                          f"then name it and save. Saved custom palettes: {saved} of {MAX_CUSTOM_PALETTES}"
                           " — they appear with a ★ above (double-click one to edit it)."))
             except tk.TclError:
                 pass
