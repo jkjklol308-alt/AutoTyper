@@ -87,7 +87,7 @@ python -m unittest test_auto_typer.py test_custom_colours.py test_update_checker
 
 Press **❓ Guide** in the header, hit **F1**, or just launch AutoTyper for the first time — the guide opens automatically once and explains every control in the app, from *Target speed* to the colour studio.
 
-- Around 70 topics across sections such as **Typing settings**, **Source text panel**, **Running a job**, **Settings window**, **The colour studio**, **Keyboard shortcuts** and **Troubleshooting**.
+- 57 topics across sections such as **Typing settings**, **Source text panel**, **Running a job**, **Settings window**, **The colour studio**, **Keyboard shortcuts** and **Troubleshooting**.
 - **Search box** at the top: type `wpm`, `typo`, `palette`, `stop`… and only the matching topics stay on screen, with a live “showing X of Y topics” count.
 - Nothing is hidden behind a manual: any control added to the window is expected to appear in the guide, and `test_guide_ui.py` fails if the documentation list is left behind.
 

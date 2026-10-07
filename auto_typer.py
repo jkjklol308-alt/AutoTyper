@@ -3581,7 +3581,9 @@ _GUIDE_ITEMS: Tuple[GuideSection, ...] = (
         ),
     ),
     GuideSection(
-        "Header buttons", "The three controls in the top-right corner.",
+        "Header buttons",
+        "The controls in the top-right corner, plus the one that appears when an "
+        "update exists.",
         (
             _guide_item("❓ Guide",
                         "Opens this window. It is also on F1, and AutoTyper opens it "
