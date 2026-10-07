@@ -96,6 +96,16 @@ def field_triplets(value: float, width: int, height: int):
             yield tuple(int(colour[i:i + 2], 16) for i in (1, 3, 5))
 
 
+def legacy_rows(value: float, width: int, height: int) -> list:
+    """Rows exactly as the old ``gradient_square_rows`` built them.
+
+    Each row was wrapped in braces, and the caller wrapped the whole list in
+    another pair -- the ``{{#RRGGBB ...} {...}}`` payload Tk actually choked
+    on. Reproduced here from the model so the negative control stays verbatim.
+    """
+    return ["{" + row + "}" for row in field_rows(value, width, height)]
+
+
 def colour_list(value: float, width: int, height: int) -> str:
     """The payload the picker *used* to send: one nested colour-name list.
 
@@ -104,12 +114,12 @@ def colour_list(value: float, width: int, height: int) -> str:
     Tcl comment. If this ever starts working the reason for the PPM route is
     worth revisiting.
     """
-    return "{" + " ".join(field_rows(value, width, height)) + "}"
+    return "{" + " ".join(legacy_rows(value, width, height)) + "}"
 
 
 def row_list(value: float, width: int, height: int) -> list:
     """One single-row colour list per scanline (the other old approach)."""
-    return field_rows(value, width, height)
+    return legacy_rows(value, width, height)
 
 
 def ppm_bytes(value: float, width: int, height: int, binary: bool = True) -> bytes:
@@ -344,7 +354,7 @@ def main(argv=None):
 
         report["paint_experiments"] = experiment_matrix(root)
         report["ppm_construct"] = rebuild_from_ppm(
-            root, value, picker.width, picker.height)
+            root, shade, picker.width, picker.height)
 
         report["screenshot"] = screenshot(editor, out / "picker.png")
         collect_images(picker, out, images)
