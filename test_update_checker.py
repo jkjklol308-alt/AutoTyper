@@ -123,8 +123,8 @@ class IsNewerVersionTests(unittest.TestCase):
 
 
 class AppVersionTests(unittest.TestCase):
-    def test_shipped_version_is_1_0_0(self):
-        self.assertEqual(at.APP_VERSION, "1.0.0")
+    def test_shipped_version_is_1_1_0(self):
+        self.assertEqual(at.APP_VERSION, "1.1.0")
 
     def test_points_at_this_repository(self):
         self.assertEqual(at.GITHUB_REPO, "jkjklol308-alt/AutoTyper")
@@ -610,20 +610,35 @@ class _StubButton:
 
     pack = grid
 
+    def winfo_exists(self):
+        return 1
+
 
 class _StubApp:
-    """Just enough object to call the real window methods on."""
+    """Just enough object to call the real window methods on.
+
+    Since v1.1.0 the header holds only the Settings button, so the download
+    affordance the app toggles is the settings window's button (stubbed here
+    as if that window were open).
+    """
 
     def __init__(self):
         self.posts = []
         self.colors = {"foreground": "#111", "accent": "#00F", "muted": "#888"}
         self.status_label = _StubButton()
         self.progress = {"value": 0, "maximum": 0}
-        self.download_btn = _StubButton()
-        self.update_btn = _StubButton()
+        self._download_exe_button = _StubButton()
+        self._update_hint = _StubButton()
+        self._available_version = None
         self.quit_calls = 0
         self.installed = []
         self.opened_pages = 0
+        # Bind the real settings-button helpers so announcement/download
+        # results exercise the genuine code paths against the stubs above.
+        self._refresh_update_controls = types.MethodType(
+            at.AutoTyperApp._refresh_update_controls, self)
+        self._set_download_button_state = types.MethodType(
+            at.AutoTyperApp._set_download_button_state, self)
 
     def _post(self, *msg):
         self.posts.append(msg)
@@ -686,9 +701,13 @@ class GuiUpdateAnnouncementTests(unittest.TestCase):
         self.messagebox.askyesno = lambda *args, **kwargs: False
         types.MethodType(self.mod.AutoTyperApp._on_update_available, self.app)(self._release())
         self.assertEqual(self.app.status_label.kw["text"],
-                         "Status: Update available — v1.3.0 (you have v1.0.0)")
-        self.assertIn("1.3.0", self.app.update_btn.kw["text"])
-        self.assertIn("exe", self.app.update_btn.kw["text"].lower())
+                         "Status: Update available — v1.3.0 (you have v1.1.0)")
+        # The offer now lives in Settings: the download button is relabelled
+        # with the version it will fetch and the hint names it too.
+        self.assertEqual(self.app._available_version, "1.3.0")
+        self.assertIn("1.3.0", self.app._download_exe_button.kw["text"])
+        self.assertIn("exe", self.app._download_exe_button.kw["text"].lower())
+        self.assertIn("1.3.0", self.app._update_hint.kw["text"])
 
     def test_declining_downloads_nothing(self):
         started = []
@@ -783,7 +802,12 @@ class GuiDownloadResultTests(unittest.TestCase):
     def test_failure_shows_an_error_and_reenables_the_button(self):
         self.result("failed", "network died")
         self.assertEqual(self.messagebox.calls[-1][0], "showerror")
-        self.assertEqual(self.app.download_btn.kw["state"], "normal")
+        self.assertEqual(self.app._download_exe_button.kw["state"], "normal")
+
+    def test_button_state_survives_a_closed_settings_window(self):
+        self.app._download_exe_button = None
+        self.result("failed", "network died")          # must not explode
+        self.assertEqual(self.messagebox.calls[-1][0], "showerror")
 
     def test_self_update_offers_to_install(self):
         installed = []

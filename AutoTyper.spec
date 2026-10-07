@@ -8,7 +8,8 @@ that the in-app updater downloads. Build it with::
 
 The updater only ever accepts a file that starts with the Windows "MZ" header,
 so a build produced by this recipe is exactly what ``--check-update`` and the
-"Get .exe" button expect to find attached to a release.
+Settings window's "Download latest AutoTyper.exe" button expect to find
+attached to a release.
 """
 
 import sys
