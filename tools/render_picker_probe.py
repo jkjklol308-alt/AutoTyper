@@ -19,12 +19,15 @@ Linux so a rendering bug can be told apart from a modelling bug.
 """
 
 import argparse
+import base64
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tkinter as tk
+import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -34,6 +37,22 @@ import auto_typer as at  # noqa: E402  (path is set up above)
 SAMPLE_POINTS = ((0, 0), (120, 0), (239, 0), (0, 80), (120, 80),
                  (239, 80), (0, 159), (120, 159), (239, 159))
 PALETTE = ("#1E3A8A", "#3B82F6", "#F8FAFC")
+
+# Findings are published as GitHub workflow annotations: on hosted runners the
+# raw log and the uploaded artifacts are not always reachable, while the
+# annotation API is. The payload is zlib+base64 (one line) so it stays small.
+ANNOTATION_PREFIX = "AUTOTYPER-PROBE:"
+CHUNK = 45000
+
+
+def emit_annotation(payload: dict, level: str = "error") -> None:
+    """Print ``payload`` as chunked workflow annotations."""
+    blob = json.dumps(payload, separators=(",", ":"), default=str).encode()
+    encoded = base64.b64encode(zlib.compress(blob, 9)).decode()
+    chunks = [encoded[i:i + CHUNK] for i in range(0, len(encoded), CHUNK)] or [""]
+    for index, chunk in enumerate(chunks, start=1):
+        print(f"::{level}::{ANNOTATION_PREFIX}{index}/{len(chunks)}:{chunk}", flush=True)
+
 
 
 def normalise_pixel(value) -> str:
@@ -84,6 +103,33 @@ def screenshot(window, destination: Path) -> str:
     return "unavailable"
 
 
+def image_from_pixels(pixels: dict, width: int, height: int):
+    """Rebuild a picture from the pixels Tk reported holding."""
+    from PIL import Image
+    image = Image.new("RGB", (width, height), (255, 255, 255))
+    for key, colour in pixels.items():
+        x, y = (int(part) for part in key.split(","))
+        normalised = at.normalise_hex_colour(colour)
+        if normalised is not None:
+            image.putpixel((x, y), tuple(int(normalised[i:i + 2], 16) for i in (1, 3, 5)))
+    return image
+
+
+def read_back_grid(image, width, height, step: int = 4):
+    """Sample the whole image (every ``step`` pixels) as ``{x,y: colour}``."""
+    return {f"{x},{y}": normalise_pixel(image.get(x, y))
+            for y in range(0, height, step) for x in range(0, width, step)}
+
+
+def png_base64(image) -> str:
+    """A compact PNG of ``image``, base64 encoded."""
+    from PIL import Image
+    small = image.convert("P", palette=Image.ADAPTIVE, colors=64)
+    buffer = io.BytesIO()
+    small.save(buffer, format="PNG", optimize=True)
+    return base64.b64encode(buffer.getvalue()).decode()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--out", default="probe-out", help="folder for the screenshot")
@@ -129,10 +175,29 @@ def main(argv=None):
     report["screenshot"] = how
     (out / "probe.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
-    print(json.dumps({k: report[k] for k in
-                      ("tk", "tcl", "shade", "field_actual", "field_expected",
-                       "field_mismatches", "shade_strip_actual", "screenshot")},
-                     indent=2))
+    images = {}
+    try:
+        grid = read_back_grid(picker._square_image, picker.width, picker.height)
+        images["tk_stored_field"] = png_base64(
+            image_from_pixels(grid, picker.width, picker.height))
+        expected_grid = {f"{x},{y}": at.gradient_square_colour(x, y, value)
+                         for y in range(0, picker.height, 4)
+                         for x in range(0, picker.width, 4)}
+        images["model_field"] = png_base64(
+            image_from_pixels(expected_grid, picker.width, picker.height))
+        shot = out / "picker.png"
+        if shot.is_file():
+            from PIL import Image
+            with Image.open(shot) as grabbed:
+                images["screenshot"] = png_base64(grabbed)
+    except Exception as err:                       # pragma: no cover - reporting only
+        images["error"] = f"{type(err).__name__}: {err}"
+
+    printed = {k: report[k] for k in
+               ("tk", "tcl", "shade", "field_actual", "field_expected",
+                "field_mismatches", "shade_strip_actual", "screenshot")}
+    print(json.dumps(printed, indent=2))
+    emit_annotation({"report": printed, "images": images}, "error")
     root.destroy()
 
     if mismatches:

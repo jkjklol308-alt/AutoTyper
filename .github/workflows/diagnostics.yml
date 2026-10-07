@@ -123,6 +123,7 @@ jobs:
           $env:PYINSTALLER_RESET_ENVIRONMENT = "1"
           $reset = Try-Launch "stale-but-reset"
           Write-Host "relaunch with the swap script's environment: $reset"
+          Write-Host "::notice::AUTOTYPER-RESTART:{`"clean`":`"$clean`",`"stale`":`"$stale`",`"reset`":`"$reset`"}"
           if ($reset -ne "started") { throw "fixed relaunch failed: $reset" }
           if ($stale -eq "dll-error") {
             Write-Host "Reproduced the reported failure, and the swap script's environment fixes it."
