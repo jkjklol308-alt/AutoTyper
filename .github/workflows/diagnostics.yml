@@ -23,11 +23,6 @@ on:
       - "auto_typer.py"
       - "AutoTyper.spec"
       - ".github/workflows/diagnostics.yml"
-    paths:
-      - "tools/render_picker_probe.py"
-      - "auto_typer.py"
-      - "AutoTyper.spec"
-      - ".github/workflows/diagnostics.yml"
 
 permissions:
   contents: read
