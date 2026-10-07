@@ -41,7 +41,7 @@ jobs:
           python -m pip install --quiet pillow
           if [ "$RUNNER_OS" = "Linux" ]; then
             sudo apt-get update -qq
-            sudo apt-get install -y -qq xvfb imagemagick
+            sudo apt-get install -y -qq xvfb xauth imagemagick
           fi
 
       - name: Probe the picker with a real Tk
