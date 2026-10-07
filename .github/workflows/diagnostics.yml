@@ -1,0 +1,138 @@
+name: Picker rendering probe
+
+# Diagnostic: the unit suite drives the picker through a tkinter stub, so a
+# mistake in the *real* Tk calls would never show up there. This job opens the
+# real editor on Windows and Linux, reads the pixels back out of the PhotoImage
+# Tk stored, and uploads a screenshot of the window.
+#
+# It also checks the self-update restart on Windows: a freshly started onefile
+# build must survive inheriting a stale PyInstaller environment (the "Error
+# loading Python DLL" reported after updating), which is what the swap script
+# now prevents.
+#
+# It runs on the default branch (so a released state is verified on every
+# merge) or on demand. It deliberately does not run on every feature-branch
+# push: the probe takes minutes on two operating systems.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "tools/render_picker_probe.py"
+      - "auto_typer.py"
+      - "AutoTyper.spec"
+      - ".github/workflows/diagnostics.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Pillow (screenshots) and a display (Linux)
+        shell: bash
+        run: |
+          python -m pip install --quiet pillow
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq xvfb xauth imagemagick
+          fi
+
+      - name: Probe the picker with a real Tk
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a python tools/render_picker_probe.py --out probe-out
+          else
+            python tools/render_picker_probe.py --out probe-out
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: picker-${{ matrix.os }}
+          path: probe-out/
+
+  restart:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyInstaller
+        run: python -m pip install --upgrade pip pyinstaller
+
+      - name: Build a onefile console probe build
+        # Console subsystem on purpose: the windowed build reports bootloader
+        # errors in a message box, which would hang the runner instead of
+        # failing. The onefile environment handling under test is identical.
+        run: pyinstaller --onefile --console --noconfirm --name AutoTyperProbe --distpath dist-probe auto_typer.py
+
+      - name: Check a onefile build starts with a stale PyInstaller environment
+        shell: pwsh
+        run: |
+          # The update swap script starts the new build with PyInstaller's
+          # onefile variables cleared and PYINSTALLER_RESET_ENVIRONMENT=1.
+          # This reproduces the relaunch both ways round: with a stale
+          # environment (the reported "Error loading Python DLL" after an
+          # update) and with the clear-out the script performs.
+          $exe = (Resolve-Path "dist-probe\AutoTyperProbe.exe").Path
+          $staleDir = Join-Path $env:TEMP "stale-mei"
+          New-Item -ItemType Directory -Force -Path $staleDir | Out-Null
+
+          function Try-Launch($label) {
+            $out = Join-Path $env:TEMP "launch-$label.txt"
+            $err = Join-Path $env:TEMP "launch-$label.err"
+            Remove-Item $out, $err -ErrorAction SilentlyContinue
+            $p = Start-Process -FilePath $exe -ArgumentList "--benchmark", "--chars", "200" `
+                 -PassThru -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError $err
+            if (-not $p.WaitForExit(120000)) { $p.Kill(); return "hung" }
+            $text = Get-Content $out -Raw -ErrorAction SilentlyContinue
+            $problems = Get-Content $err -Raw -ErrorAction SilentlyContinue
+            Write-Host "--- $label (exit $($p.ExitCode)) ---"
+            if ($text) { Write-Host $text }
+            if ($problems) { Write-Host "stderr: $problems" }
+            if ($problems -match "Python DLL") { return "dll-error" }
+            if ($p.ExitCode -ne 0) { return "exit-$($p.ExitCode)" }
+            if ($text -notmatch "AutoTyper Biomechanical") { return "no-output" }
+            return "started"
+          }
+
+          $clean = Try-Launch "clean"
+          if ($clean -ne "started") { throw "clean launch failed: $clean" }
+
+          # The environment a running onefile build leaves behind for its
+          # children: its extraction folder (deleted when it exits) and its own
+          # process level.
+          $env:_PYI_APPLICATION_HOME_DIR = $staleDir
+          $env:_PYI_ARCHIVE_FILE = $exe
+          $env:_PYI_PARENT_PROCESS_LEVEL = "1"
+          $stale = Try-Launch "stale"
+          Write-Host "stale environment result: $stale"
+
+          # Same stale environment plus the clear-out the swap script performs.
+          $env:PYINSTALLER_RESET_ENVIRONMENT = "1"
+          $reset = Try-Launch "stale-but-reset"
+          Write-Host "relaunch with the swap script's environment: $reset"
+          Write-Host "::notice::AUTOTYPER-RESTART:{`"clean`":`"$clean`",`"stale`":`"$stale`",`"reset`":`"$reset`"}"
+          if ($reset -ne "started") { throw "fixed relaunch failed: $reset" }
+          if ($stale -eq "dll-error") {
+            Write-Host "Reproduced the reported failure, and the swap script's environment fixes it."
+          } else {
+            Write-Host "NOTE: the stale environment no longer breaks the bootloader here ($stale)"
+          }

@@ -29,6 +29,8 @@ When an update does exist, the status bar names the new version, AutoTyper asks 
 | The packaged **AutoTyper.exe** | Downloads the new build, then offers to install it. On install the app replaces itself, restarts automatically, and keeps your previous build as `AutoTyper.exe.old` in case you want to roll back. |
 | From **source** (`python auto_typer.py`) | Downloads the new `AutoTyper.exe` into your Downloads folder and shows you where it went, so you can switch to the packaged build. |
 
+The automatic restart is deliberately set up like a manual double-click: it starts the new build with a **clean environment**. A onefile build keeps the path of its unpacked temporary folder in the environment, and a restart that inherited it would look for that (already deleted) folder instead of unpacking its own files — which made the app fail with *"Error loading Python DLL"* right after an update while the very same file started fine from a shortcut. If the swap cannot complete at all, the existing build is brought back up instead of leaving you without a program.
+
 Only files that begin with the Windows `MZ` executable header are ever accepted, so a failed, truncated or HTML-error-page download can never overwrite a working build. The CLI mirrors this:
 
 ```bash
@@ -86,6 +88,8 @@ python -m unittest test_auto_typer.py test_custom_colours.py test_update_checker
 ## Custom UI Colours
 
 ![The Paint-style gradient used by the custom colour picker](docs/colour-gradient.png)
+
+Both panels above are drawn from the app's own colour maths: while you hold a colour the field is painted at its brightness, the current colour is shown as a swatch in the field's bottom-left corner and by the filled dot inside the marker, and when you edit a near-black colour the field stops darkening at `FIELD_MIN_SHADE` (0.4) so it stays a readable rainbow instead of turning into a black box — the swatch and the hex box still show the exact colour.
 
 The header keeps a single **⚙ Settings** button — palettes, window behaviour and updates all live inside it:
 

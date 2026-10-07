@@ -28,7 +28,12 @@ A next-generation human typing simulator implementing:
   9. .exe Delivery: updates download the published AutoTyper.exe rather than a
      Python script. A packaged build swaps itself in and restarts
      automatically (keeping a .old backup); a build running from source saves
-     the executable next to the user's other downloads.
+     the executable next to the user's other downloads. Since v1.1.2 the
+     restart is started with a clean environment, exactly like a manual
+     double-click: PyInstaller's onefile variables are cleared first, so the
+     next build unpacks its own files instead of looking for the previous
+     process's temporary folder (which made the app die with "Error loading
+     Python DLL" straight after an update).
  10. Custom UI Colours (v1.1.0, reworked in v1.1.1): a Microsoft-Paint style
      gradient colour picker — a full colour field (rainbow of hues across,
      saturation fading down, drawn at the current shade) plus a white-to-black
@@ -73,7 +78,7 @@ try:
 except ImportError:
     tk = messagebox = ttk = None
 
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 APP_NAME = "AutoTyper"
 GITHUB_REPO = "jkjklol308-alt/AutoTyper"
 EXE_ASSET_NAME = "AutoTyper.exe"
@@ -1568,6 +1573,41 @@ class TracePlayer:
 #     exits (Windows keeps the .exe locked while it runs), a .old backup of the
 #     previous executable is left behind, and a download that is not a real
 #     Windows executable is rejected before anything is touched.
+#   * Restarting is clean: the relaunch is started without PyInstaller's
+#     onefile bookkeeping in the environment (see
+#     `restart_environment()`), so the new build extracts its own files
+#     instead of looking for the previous process's temporary folder.
+#
+# Why the environment matters: a onefile build keeps the path of its unpacked
+# temporary directory in the environment (_PYI_APPLICATION_HOME_DIR, and
+# _PYI_ARCHIVE_FILE for the executable itself) and hands both to any process
+# it starts. A restart that inherits those variables makes the *new* build
+# believe it is the child of a still-running launcher: it skips unpacking and
+# loads python3xx.dll straight out of the previous process's folder — which
+# has just been deleted — and dies with "Error loading Python DLL" before a
+# single line of Python runs. Launching the same file by hand works, because a
+# double-click starts with a clean environment. Every relaunch therefore
+# scrubs those variables, and the swap script additionally asks the bootloader
+# for a reset (PYINSTALLER_RESET_ENVIRONMENT=1) as a second line of defence.
+
+# PyInstaller's onefile bookkeeping. They describe *this* process's unpacked
+# files, so they must never be handed to a freshly started build.
+PYINSTALLER_RUNTIME_ENV_VARS = (
+    "_PYI_APPLICATION_HOME_DIR",
+    "_PYI_ARCHIVE_FILE",
+    "_PYI_PARENT_PROCESS_LEVEL",
+    "_PYI_SPLASH_IPC",
+    "_PYI_LINUX_PROCESS_NAME",
+    "_MEIPASS2",
+)
+
+# PyInstaller honours this one itself: "1" forces a full environment reset, as
+# if the build had been started from a clean shell.
+PYINSTALLER_RESET_ENV_VAR = "PYINSTALLER_RESET_ENVIRONMENT"
+
+# Windows environment variable names are case-insensitive, so matching is done
+# on upper case copies.
+_PYINSTALLER_RUNTIME_ENV_VARS_UPPER = frozenset(name.upper() for name in PYINSTALLER_RUNTIME_ENV_VARS)
 
 _VERSION_DECLARATION = re.compile(
     r'^[ \t]*APP_VERSION[ \t]*=[ \t]*["\']([0-9A-Za-z._+-]+)["\']', re.MULTILINE
@@ -1834,6 +1874,43 @@ def running_executable() -> Optional[Path]:
     return Path(executable) if executable else None
 
 
+def restart_environment(env: Optional[dict] = None) -> Dict[str, str]:
+    """A copy of the environment with PyInstaller's onefile state removed.
+
+    Everything a freshly started build needs (``PATH``, ``TEMP``, the user's
+    Windows folders) is kept; only the variables that describe *this*
+    process's unpacked files are dropped, so the new build unpacks its own.
+    Used for every relaunch and restart this program performs.
+    """
+    source = os.environ if env is None else env
+    clean: Dict[str, str] = {}
+    for name, value in source.items():
+        if name.upper() in _PYINSTALLER_RUNTIME_ENV_VARS_UPPER:
+            continue
+        clean[name] = value
+    return clean
+
+
+def scrub_pyinstaller_runtime_environment(env=None) -> List[str]:
+    """Delete this process's PyInstaller onefile state from ``env``.
+
+    Called once at start-up so that *any* child process — the update swap
+    script, a file manager, anything spawned later — inherits a clean
+    environment instead of a description of our own unpacked files.
+
+    ``env`` defaults to ``os.environ``; returns the names actually removed.
+    """
+    target = os.environ if env is None else env
+    removed: List[str] = []
+    for name in PYINSTALLER_RUNTIME_ENV_VARS:
+        try:
+            target.pop(name)
+        except (KeyError, TypeError):
+            continue
+        removed.append(name)
+    return removed
+
+
 def default_download_dir() -> Path:
     """Where a .exe is saved when it cannot replace the running program."""
     for candidate in (Path.home() / "Downloads", Path.home()):
@@ -2006,18 +2083,34 @@ def build_windows_swap_script(new_exe, target_exe, wait_seconds: int = 120,
     Windows locks a running executable, so the copy is retried once a second
     until it succeeds (or `wait_seconds` elapse); `copy` failing while the old
     build is still alive is expected and simply loops. The previous executable
-    is kept as "<name>.old" so a bad build can always be rolled back.
+    is copied to "<name>.old" *before* the swap, so a bad build can always be
+    rolled back.
+
+    The script also clears PyInstaller's onefile variables and asks the
+    bootloader for a full environment reset before starting the new build:
+    without that, the relaunched executable inherits the path of this
+    process's temporary folder, skips unpacking and fails to load the Python
+    DLL (the "error right after an update" that a manual double-click of the
+    very same file does not show).
     """
     new_path = _bat_quote(new_exe)
     target_path = _bat_quote(target_exe)
-    backup_lines = f'copy /Y "%TARGET%" "%TARGET%.old" >nul 2>&1\n' if backup else ""
+    # Taken while the old build is still in place: after the swap the target
+    # *is* the new build, so a later copy would back up the wrong file.
+    backup_lines = 'copy /Y "%TARGET%" "%TARGET%.old" >nul 2>&1\r\n' if backup else ""
     return (
         "@echo off\r\n"
         "setlocal\r\n"
         f'set "NEW={new_path}"\r\n'
         f'set "TARGET={target_path}"\r\n'
         f'set "TRIES={max(1, int(wait_seconds))}"\r\n'
-        "set /a COUNT=0\r\n"
+        # Start the new build exactly like a hand-launched copy: no unpacked-
+        # file paths from this process, and an explicit reset in case something
+        # else re-adds them.
+        f'set "{PYINSTALLER_RESET_ENV_VAR}=1"\r\n'
+        + "".join(f'set "{name}=\r\n' for name in PYINSTALLER_RUNTIME_ENV_VARS)
+        + "set /a COUNT=0\r\n"
+        f"{backup_lines}"
         ":waitloop\r\n"
         'copy /Y "%NEW%" "%TARGET%" >nul 2>&1\r\n'
         "if not errorlevel 1 goto installed\r\n"
@@ -2026,11 +2119,13 @@ def build_windows_swap_script(new_exe, target_exe, wait_seconds: int = 120,
         "ping -n 2 127.0.0.1 >nul\r\n"
         "goto waitloop\r\n"
         ":installed\r\n"
-        f"{backup_lines}"
         'del "%NEW%" >nul 2>&1\r\n'
         'start "" "%TARGET%"\r\n'
         '(goto) 2>nul & del "%~f0"\r\n'
         ":giveup\r\n"
+        "rem The swap never succeeded: bring the existing build back up so the\r\n"
+        "rem user is not left without a working program.\r\n"
+        'start "" "%TARGET%"\r\n'
         "exit /b 1\r\n"
     )
 
@@ -2039,13 +2134,18 @@ def build_posix_swap_script(new_exe, target_exe, pid: int = 0) -> str:
     """A detached shell script that swaps in the new build after the app exits.
 
     Kept for completeness (development builds on Linux/macOS); the packaged
-    application is Windows-only.
+    application is Windows-only. Like the Windows script it clears the
+    PyInstaller onefile variables before relaunching, so the new build unpacks
+    its own files.
     """
+    unset_lines = "".join(f"unset {name}\n" for name in PYINSTALLER_RUNTIME_ENV_VARS)
     return (
         "#!/bin/sh\n"
         f'NEW="{new_exe}"\n'
         f'TARGET="{target_exe}"\n'
         f"PID={int(pid)}\n"
+        f"export {PYINSTALLER_RESET_ENV_VAR}=1\n"
+        f"{unset_lines}"
         "i=0\n"
         'while kill -0 "$PID" 2>/dev/null; do\n'
         "  i=$((i+1))\n"
@@ -2069,17 +2169,23 @@ def build_swap_script(new_exe, target_exe, pid: int = 0, *, windows: bool = None
 
 
 def launch_swap_script(script_path: Path, *, windows: bool = None) -> None:
-    """Run the swap script detached, so it survives this process exiting."""
+    """Run the swap script detached, so it survives this process exiting.
+
+    The script is started with a scrubbed environment (`restart_environment`),
+    so everything it starts later — including the new build — is launched as
+    if the user had double-clicked it.
+    """
     on_windows = (os.name == "nt") if windows is None else windows
+    env = restart_environment()
     if on_windows:
         creationflags = 0
         for flag in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP"):
             creationflags |= getattr(subprocess, flag, 0)
         subprocess.Popen(["cmd", "/c", str(script_path)], close_fds=True,
-                         creationflags=creationflags)
+                         env=env, creationflags=creationflags)
     else:
         subprocess.Popen(["/bin/sh", str(script_path)], start_new_session=True,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def install_update_and_restart(new_exe, target_exe=None, *, windows: bool = None,
@@ -2224,8 +2330,14 @@ HUE_STRIP_WIDTH = 22         # px-wide rainbow strip beside the square
 MAX_CUSTOM_PALETTES = 16     # guard against an unbounded settings file
 CUSTOM_PALETTE_ROLES = ("primary", "accent", "background")
 
+# The colour field is drawn at the shade being held, but never darker than
+# this: a palette whose current colour is nearly black (most of the dark
+# built-ins are) used to leave the user staring at a black box with no visible
+# gradient at all. The exact colour is always shown by the swatch and the hex
+# box, so nothing is lost by keeping the field readable.
+FIELD_MIN_SHADE = 0.4
+
 _HEX_COLOUR_RE = re.compile(r"^#?([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$")
-_HEX_BYTE = tuple("{:02X}".format(value) for value in range(256))
 
 
 def clamp_unit(value) -> float:
@@ -2309,6 +2421,15 @@ def value_to_y(value: float, height: int = GRADIENT_HEIGHT) -> float:
     return (1.0 - clamp_unit(value)) * (height - 1)
 
 
+def rendered_shade(value: float) -> float:
+    """Brightness the colour field is drawn at for a held ``value``.
+
+    Never below ``FIELD_MIN_SHADE``: whichever colour is being edited, the
+    field stays a readable rainbow instead of fading to black.
+    """
+    return max(clamp_unit(value), FIELD_MIN_SHADE)
+
+
 def gradient_square_colour(x: float, y: float, value: float,
                            width: int = GRADIENT_WIDTH,
                            height: int = GRADIENT_HEIGHT) -> str:
@@ -2322,10 +2443,15 @@ def shade_strip_colour(y: float, height: int = GRADIENT_HEIGHT) -> str:
     return hsv_to_hex(0.0, 0.0, value_at(y, height))
 
 
+def ppm_header(width: int, height: int) -> bytes:
+    """The P6 (binary RGB) PPM header Tk's photo reader expects."""
+    return b"P6\n%d %d\n255\n" % (max(1, int(width)), max(1, int(height)))
+
+
 def _hue_runs(width: int) -> List[Tuple[int, int, int]]:
     """Contiguous ``(sector, first_column, end_column)`` runs of the rainbow.
 
-    Columns sharing a colorsys sector are rendered together so the row
+    Columns sharing a colorsys sector are rendered together so the field
     builder stays a handful of list comprehensions instead of a per-pixel
     branch.
     """
@@ -2340,14 +2466,24 @@ def _hue_runs(width: int) -> List[Tuple[int, int, int]]:
     return runs
 
 
-def gradient_square_rows(value: float, width: int = GRADIENT_WIDTH,
-                         height: int = GRADIENT_HEIGHT) -> List[str]:
-    """One ``{#RRGGBB ...}`` PhotoImage row per scanline of the colour field.
+def gradient_square_ppm(value: float, width: int = GRADIENT_WIDTH,
+                        height: int = GRADIENT_HEIGHT) -> bytes:
+    """P6 PPM image data for the colour field at brightness ``value``.
 
-    Pixel-for-pixel identical to ``gradient_square_colour`` but computed
-    without a per-pixel function call, so dragging the shade strip re-renders
-    the whole square in milliseconds. The per-row products evaluate exactly
-    the expressions ``colorsys`` uses.
+    This is what is handed to Tk (``image configure -data <bytes> -format ppm``;
+    ``PhotoImage.put`` cannot name a format before Python 3.14). A nested list of
+    ``#RRGGBB`` colour names — the obvious-looking alternative, and what this
+    widget used to send — is *rejected* by Tk with ``can't parse color
+    "#FF0000 #FF0000"``: the photo ``put`` parser treats a leading ``#`` as a
+    comment, so a row of colours collapses into a single unparsable "colour"
+    and the whole block is thrown away. Because that error was swallowed, the
+    field and the shade strip silently stayed unset and the editor showed two
+    empty boxes. Raw image data has no such pitfall.
+
+    Pixel-for-pixel identical to ``gradient_square_colour`` but built without a
+    per-pixel function call, so dragging the shade strip re-renders the whole
+    field in milliseconds. The per-row products evaluate exactly the
+    expressions ``colorsys`` uses.
     """
     width = max(2, int(width))
     height = max(2, int(height))
@@ -2357,42 +2493,65 @@ def gradient_square_rows(value: float, width: int = GRADIENT_WIDTH,
         scaled = (x / (width - 1)) * 6.0
         fracs.append(scaled - math.floor(scaled))
     runs = _hue_runs(width)
-    hex_byte = _HEX_BYTE
-    rows: List[str] = []
+    data = bytearray(ppm_header(width, height))
     for y in range(height):
         s = 1.0 - y / (height - 1)
-        p = v * (1.0 - s)
-        q = [v * (1.0 - s * f) for f in fracs]
-        t = [v * (1.0 - s * (1.0 - f)) for f in fracs]
-        hex_v = hex_byte[round(v * 255)]
-        hex_p = hex_byte[round(p * 255)]
-        parts = []
+        p = round(v * (1.0 - s) * 255)
+        q = [round(v * (1.0 - s * f) * 255) for f in fracs]
+        t_ = [round(v * (1.0 - s * (1.0 - f)) * 255) for f in fracs]
+        v_byte = round(v * 255)
         for sector, first, end in runs:
             if sector == 0:      # (v, t, p)
-                parts.extend("#" + hex_v + hex_byte[round(c * 255)] + hex_p for c in t[first:end])
+                for c in t_[first:end]:
+                    data += bytes((v_byte, c, p))
             elif sector == 1:    # (q, v, p)
-                parts.extend("#" + hex_byte[round(c * 255)] + hex_v + hex_p for c in q[first:end])
+                for c in q[first:end]:
+                    data += bytes((c, v_byte, p))
             elif sector == 2:    # (p, v, t)
-                parts.extend("#" + hex_p + hex_v + hex_byte[round(c * 255)] for c in t[first:end])
+                for c in t_[first:end]:
+                    data += bytes((p, v_byte, c))
             elif sector == 3:    # (p, q, v)
-                parts.extend("#" + hex_p + hex_byte[round(c * 255)] + hex_v for c in q[first:end])
+                for c in q[first:end]:
+                    data += bytes((p, c, v_byte))
             elif sector == 4:    # (t, p, v)
-                parts.extend("#" + hex_byte[round(c * 255)] + hex_p + hex_v for c in t[first:end])
+                for c in t_[first:end]:
+                    data += bytes((c, p, v_byte))
             else:                # (v, p, q)
-                parts.extend("#" + hex_v + hex_p + hex_byte[round(c * 255)] for c in q[first:end])
-        rows.append("{" + " ".join(parts) + "}")
-    return rows
+                for c in q[first:end]:
+                    data += bytes((v_byte, p, c))
+    return bytes(data)
 
 
-def shade_strip_rows(width: int = HUE_STRIP_WIDTH,
-                     height: int = GRADIENT_HEIGHT) -> List[str]:
-    """``{#RRGGBB ...}`` PhotoImage rows for the white->black shade strip."""
+def shade_strip_ppm(width: int = HUE_STRIP_WIDTH,
+                    height: int = GRADIENT_HEIGHT) -> bytes:
+    """P6 PPM data for the white->black shade strip (greyscale, so all equal)."""
     width = max(1, int(width))
     height = max(2, int(height))
+    data = bytearray(ppm_header(width, height))
+    for y in range(height):
+        grey = round(value_at(y, height) * 255)
+        data += bytes((grey, grey, grey)) * width
+    return bytes(data)
+
+
+def ppm_pixels(data: bytes, width: int, height: int) -> List[str]:
+    """Decode P6 data back into ``#RRGGBB`` rows (used by the tests).
+
+    Reading the payload back proves what the field will contain without
+    needing a display, which is as close to "what does the user see" as a
+    headless test can get.
+    """
+    header = ppm_header(width, height)
+    if not data.startswith(header):
+        raise ValueError("not P6 data for this size")
+    body = data[len(header):]
     rows: List[str] = []
     for y in range(height):
-        colour = shade_strip_colour(y, height)
-        rows.append("{" + " ".join([colour] * width) + "}")
+        start = y * width * 3
+        chunk = body[start:start + width * 3]
+        rows.append(" ".join(
+            "#{:02X}{:02X}{:02X}".format(*chunk[offset:offset + 3])
+            for offset in range(0, len(chunk), 3)))
     return rows
 
 
@@ -2484,16 +2643,26 @@ class ColourGradientPicker(_TkFrame):
     """The Microsoft Paint style colour picker ("Edit colours").
 
     The big square is the colour field itself: the whole rainbow runs left to
-    right, pure colours fade to greyscale towards the bottom, and the square
-    is drawn at the current shade — so the colour you have picked is always
-    the very pixel sitting under the marker ring. The white-to-black strip
-    beside it is the shade selector: slide it and the whole field darkens or
-    lightens with it. Click or drag anywhere on either area.
+    right and pure colours fade to greyscale towards the bottom. It is drawn
+    at the current shade (never darker than ``FIELD_MIN_SHADE``, so the field
+    is always a readable rainbow instead of a black box), and the colour
+    currently held is shown twice: as a filled dot inside the marker ring and
+    as a swatch in the bottom-left corner of the field. The white-to-black
+    strip beside the square is the shade selector.
+
+    Clicking or dragging *in the field* picks the colour of the very pixel
+    under the pointer and takes its brightness to full (Paint does the same
+    with its brightness slider), so what you click is what you get. Dragging
+    the shade strip then darkens or lightens that colour while the field stays
+    legible — the swatch and the hex box always show the exact result.
     """
 
     PAD = 10          # px of margin around the artwork
     GAP = 16          # px between the colour field and the shade strip
     MARKER_R = 6      # radius of the ring marking the picked colour
+    SWATCH_W = 46     # px of the "current colour" swatch inside the field
+    SWATCH_H = 26
+    SWATCH_MARGIN = 8
 
     def __init__(self, master, *, width: int = GRADIENT_WIDTH, height: int = GRADIENT_HEIGHT,
                  hue_width: int = HUE_STRIP_WIDTH, on_pick=None, background: str = "#FFFFFF",
@@ -2507,11 +2676,25 @@ class ColourGradientPicker(_TkFrame):
         self._marker = marker
         self._hsv: Tuple[float, float, float] = (0.0, 1.0, 1.0)
         self.selected_colour: Optional[str] = None
+        # Set when Tk refused the pixel data; the probe workflow checks it.
+        self.last_paint_error: Optional[str] = None
 
         pad = self.PAD
         self.square_box = (pad, pad, pad + self.width - 1, pad + self.height - 1)
         hue_x = pad + self.width + self.GAP
         self.hue_box = (hue_x, pad, hue_x + self.hue_width - 1, pad + self.height - 1)
+        # The swatch is a corner chip *of the field*: it scales down with
+        # small fields so it is never a large share of the artwork.
+        margin = min(self.SWATCH_MARGIN, max(2, self.width // 12), max(2, self.height // 12))
+        swatch_w = max(1, min(self.SWATCH_W, self.width // 3))
+        swatch_h = max(1, min(self.SWATCH_H, self.height // 4))
+        self.swatch_box = (pad + margin, pad + self.height - margin - swatch_h,
+                           pad + margin + swatch_w, pad + self.height - margin)
+        # A click counts as landing on the swatch only when the field is big
+        # enough for the chip to be a genuine corner of it; in a tiny canvas
+        # (as the tests use) every pixel stays clickable. The editor's own
+        # field is GRADIENT_WIDTH x GRADIENT_HEIGHT, far above the threshold.
+        self._swatch_clickable = self.width >= 60 and self.height >= 40
 
         self.canvas = tk.Canvas(self, width=hue_x + self.hue_width + pad,
                                 height=pad * 2 + self.height, bg=background,
@@ -2529,8 +2712,18 @@ class ColourGradientPicker(_TkFrame):
                                      outline=border, fill="", width=1)
         self.canvas.create_rectangle(hx0 - 1, hy0 - 1, hx1 + 1, hy1 + 1,
                                      outline=border, fill="", width=1)
+        # The swatch sits inside the field and shows the colour being held, at
+        # the shade being held: a white halo under a dark outline keeps it
+        # visible on any part of the rainbow.
+        swatch = self.swatch_box
+        self.canvas.create_rectangle(swatch[0] - 2, swatch[1] - 2, swatch[2] + 2, swatch[3] + 2,
+                                     outline="#FFFFFF", fill="", width=2)
+        self._swatch_item = self.canvas.create_rectangle(swatch[0] - 1, swatch[1] - 1,
+                                                         swatch[2] + 1, swatch[3] + 1,
+                                                         outline=marker, fill="", width=1)
         # A white ring around a dark ring stays visible on any shade, from
-        # near-white to near-black.
+        # near-white to near-black; the dot inside carries the picked colour.
+        self._marker_fill = self.canvas.create_oval(0, 0, 0, 0, outline="", fill="")
         self._shade_marker_outer = self.canvas.create_oval(0, 0, 0, 0, outline="#FFFFFF",
                                                            fill="", width=2)
         self._shade_marker_inner = self.canvas.create_oval(0, 0, 0, 0, outline=marker,
@@ -2546,6 +2739,9 @@ class ColourGradientPicker(_TkFrame):
         self._render_strip()
         self._render_square()
         self._move_markers()
+        # Nothing has been picked yet, so the chip shows the colour the marker
+        # is sitting on (the top-left of the field): the box is never blank.
+        self._show_current_colour(hsv_to_hex(*self._hsv))
 
     # -- properties ------------------------------------------------------
     @property
@@ -2553,18 +2749,38 @@ class ColourGradientPicker(_TkFrame):
         """The hue/saturation/value currently shown by the markers."""
         return self._hsv
 
+    @property
+    def field_shade(self) -> float:
+        """Brightness the field itself is drawn at (never below the floor)."""
+        return rendered_shade(self._hsv[2])
+
     # -- rendering -------------------------------------------------------
+    def _paint(self, image, data: bytes) -> None:
+        """Show P6 pixel data on ``image`` (see ``gradient_square_ppm``).
+
+        ``image configure -data`` is used rather than ``photo put``: before
+        Python 3.14 ``PhotoImage.put`` cannot take an image format, and its
+        colour-name list form is what silently failed — see
+        ``gradient_square_ppm``. A build that cannot draw the gradient records
+        the reason in ``last_paint_error`` instead of leaving an empty box
+        behind, and the editor shows a note when that happens.
+        """
+        try:
+            image.configure(data=data, format="ppm")
+            self.last_paint_error = None
+        except tk.TclError as err:
+            self.last_paint_error = str(err)
+
     def _render_square(self):
         try:
-            self._square_image.put("{" + " ".join(
-                gradient_square_rows(self._hsv[2], self.width, self.height)) + "}")
+            self._paint(self._square_image,
+                        gradient_square_ppm(self.field_shade, self.width, self.height))
         except tk.TclError:
             pass  # destroyed mid-drag or no usable display: markers still move
 
     def _render_strip(self):
         try:
-            self._strip_image.put("{" + " ".join(
-                shade_strip_rows(self.hue_width, self.height)) + "}")
+            self._paint(self._strip_image, shade_strip_ppm(self.hue_width, self.height))
         except tk.TclError:
             pass
 
@@ -2576,11 +2792,24 @@ class ColourGradientPicker(_TkFrame):
         r = self.MARKER_R
         strip_y = hy0 + value_to_y(self._hsv[2], self.height)
         try:
+            self.canvas.coords(self._marker_fill, cx - r + 2, cy - r + 2,
+                               cx + r - 2, cy + r - 2)
             self.canvas.coords(self._shade_marker_outer, cx - r, cy - r, cx + r, cy + r)
             self.canvas.coords(self._shade_marker_inner, cx - r + 2, cy - r + 2,
                                cx + r - 2, cy + r - 2)
             self.canvas.coords(self._hue_marker_outer, hx0 - 5, strip_y - 5, hx1 + 5, strip_y + 5)
             self.canvas.coords(self._hue_marker_inner, hx0 - 3, strip_y - 3, hx1 + 3, strip_y + 3)
+        except tk.TclError:
+            pass
+
+    def _show_current_colour(self, colour: Optional[str] = None):
+        """Fill the marker dot and the field's swatch with the current colour."""
+        shade = colour or self.selected_colour
+        if shade is None:
+            return
+        try:
+            self.canvas.itemconfigure(self._swatch_item, fill=shade)
+            self.canvas.itemconfigure(self._marker_fill, fill=shade)
         except tk.TclError:
             pass
 
@@ -2593,22 +2822,39 @@ class ColourGradientPicker(_TkFrame):
         hx0, hy0, hx1, hy1 = self.hue_box
         slack = self.PAD / 2.0
         hue, saturation, value = self._hsv
-        if sx0 - slack <= x <= sx1 + slack and sy0 - slack <= y <= sy1 + slack:
+        if (sx0 - slack <= x <= sx1 + slack and sy0 - slack <= y <= sy1 + slack
+                and not self._in_swatch(x, y)):
             hue, saturation = point_to_hs(x - sx0, y - sy0, self.width, self.height)
+            # Full brightness: the colour you clicked is the colour you get,
+            # and the field keeps showing every hue (the strip darkens it
+            # afterwards if you want a quieter colour).
+            value = 1.0
         elif hx0 - slack <= x <= hx1 + slack and hy0 - slack <= y <= hy1 + slack:
             value = value_at(y - hy0, self.height)
         else:
-            return  # clicked the margin: keep the current colour
+            return  # clicked the margin (or the swatch): keep the current colour
         self._apply_hsv((hue, saturation, value))
+
+    def _in_swatch(self, x: float, y: float) -> bool:
+        """True when ``(x, y)`` is on the current-colour swatch chip.
+
+        The chip is painted over the field, so clicks on it must not pick the
+        colour of the pixels it hides; two pixels of slack cover its outline.
+        """
+        if not self._swatch_clickable:
+            return False
+        return (self.swatch_box[0] - 2 <= x <= self.swatch_box[2] + 2
+                and self.swatch_box[1] - 2 <= y <= self.swatch_box[3] + 2)
 
     def _apply_hsv(self, hsv: Tuple[float, float, float], notify: bool = True):
         hue, saturation, value = (clamp_unit(part) for part in hsv)
-        value_changed = value != self._hsv[2]
+        shade_changed = rendered_shade(value) != self.field_shade
         self._hsv = (hue, saturation, value)
         self.selected_colour = hsv_to_hex(hue, saturation, value)
-        if value_changed:
+        if shade_changed:
             self._render_square()  # the field is drawn at the current shade
         self._move_markers()
+        self._show_current_colour()
         if notify and self._on_pick is not None:
             self._on_pick(self.selected_colour)
 
@@ -2628,6 +2874,7 @@ class ColourGradientPicker(_TkFrame):
             hue, saturation = self._hsv[0], self._hsv[1]
         self._apply_hsv((hue, saturation, value), notify=False)
         self.selected_colour = normalise_hex_colour(colour)
+        self._show_current_colour(self.selected_colour)
 
 
 class CustomPaletteEditor(_TkToplevel):
@@ -2708,6 +2955,13 @@ class CustomPaletteEditor(_TkToplevel):
                                   font=("Segoe UI", 8))
         self._hex_hint.pack(side="left", padx=(8, 0))
 
+        # If Tk ever refuses the gradient's pixel data the box would be blank,
+        # which is exactly the bug this picker exists to fix: say so instead.
+        self._paint_hint = tk.Label(left, text="", bg=c["background"], fg=c["accent"],
+                                    font=("Segoe UI", 8), justify="left",
+                                    wraplength=GRADIENT_WIDTH + HUE_STRIP_WIDTH + 40)
+        self._paint_hint.pack(anchor="w", pady=(6, 0))
+
         right = tk.Frame(main, bg=c["background"])
         right.pack(side="left", anchor="n", padx=(20, 0), fill="both", expand=True)
 
@@ -2769,11 +3023,23 @@ class CustomPaletteEditor(_TkToplevel):
 
         self._role_changed()
         self._refresh_preview()
+        self._report_paint_state()
         self.protocol("WM_DELETE_WINDOW", self.destroy)
 
     # -- internals -----------------------------------------------------
     def _picked(self, colour: str):
         self._set_role_colour(self.role_var.get(), colour)
+        self._report_paint_state()
+
+    def _report_paint_state(self):
+        """Tell the user when the gradient itself could not be drawn."""
+        error = self.picker.last_paint_error
+        if error:
+            self._paint_hint.configure(
+                text="The colour gradient could not be drawn on this system "
+                     f"({error}). Pick colours with the shade strip or the hex box.")
+        else:
+            self._paint_hint.configure(text="")
 
     def _apply_typed_hex(self):
         colour = normalise_hex_colour(self.hex_var.get())
@@ -3964,6 +4230,13 @@ class AutoTyperApp(_TkBase):
 # =============================================================================
 
 def main(argv=None):
+    # Drop PyInstaller's onefile bookkeeping before anything else happens:
+    # every process this program starts (the update swap script, a file
+    # manager, a helper such as pbpaste) then inherits a clean environment,
+    # and a restarted build unpacks its own files. See the notes on
+    # `restart_environment` at the top of section 10.
+    scrub_pyinstaller_runtime_environment()
+
     ap = argparse.ArgumentParser(description="AutoTyper: Biomechanical Keystroke Simulator")
     ap.add_argument("--benchmark", action="store_true", help="simulate trace and print biomechanical metrics")
     ap.add_argument("--wpm", type=int, default=110, help="target typing speed in words per minute")

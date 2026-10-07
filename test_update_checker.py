@@ -123,8 +123,8 @@ class IsNewerVersionTests(unittest.TestCase):
 
 
 class AppVersionTests(unittest.TestCase):
-    def test_shipped_version_is_1_1_1(self):
-        self.assertEqual(at.APP_VERSION, "1.1.1")
+    def test_shipped_version_is_1_1_2(self):
+        self.assertEqual(at.APP_VERSION, "1.1.2")
 
     def test_points_at_this_repository(self):
         self.assertEqual(at.GITHUB_REPO, "jkjklol308-alt/AutoTyper")
@@ -417,6 +417,59 @@ class ExecutableDetectionTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Restarting with a clean environment
+#
+# A onefile build describes its own unpacked files in the environment
+# (_PYI_APPLICATION_HOME_DIR and friends). Handing those to a freshly started
+# build makes it load the Python DLL out of a temporary folder that has just
+# been deleted, so the relaunch after an update died with "Error loading
+# Python DLL" while launching the very same file by hand worked. Everything
+# that restarts a build must scrub them.
+# ---------------------------------------------------------------------------
+class RestartEnvironmentTests(unittest.TestCase):
+    def test_drops_every_pyinstaller_runtime_variable(self):
+        dirty = {name: "stale" for name in at.PYINSTALLER_RUNTIME_ENV_VARS}
+        self.assertEqual(at.restart_environment(dirty), {})
+
+    def test_matches_windows_case_insensitively(self):
+        dirty = {"_meipass2": "x", "_pyi_archive_file": "y", "_PYI_APPLICATION_HOME_DIR": "z"}
+        self.assertEqual(at.restart_environment(dirty), {})
+
+    def test_keeps_the_environment_the_restart_actually_needs(self):
+        dirty = {
+            "PATH": r"C:\Windows\System32",
+            "TEMP": r"C:\Users\me\AppData\Local\Temp",
+            "USERPROFILE": r"C:\Users\me",
+            "_PYI_APPLICATION_HOME_DIR": r"C:\Users\me\AppData\Local\Temp\_MEI1234",
+        }
+        clean = at.restart_environment(dirty)
+        self.assertEqual(clean, {"PATH": dirty["PATH"], "TEMP": dirty["TEMP"],
+                                 "USERPROFILE": dirty["USERPROFILE"]})
+        self.assertNotIn("_PYI_APPLICATION_HOME_DIR", clean)
+
+    def test_defaults_to_the_real_environment_without_mutating_it(self):
+        with mock.patch.dict(os.environ, {"_PYI_ARCHIVE_FILE": "here.exe"}, clear=False):
+            clean = at.restart_environment()
+            self.assertNotIn("_PYI_ARCHIVE_FILE", clean)
+            self.assertIn("_PYI_ARCHIVE_FILE", os.environ)   # still ours, just not copied
+
+    def test_scrub_removes_from_this_process_and_reports_what_went(self):
+        target = {"PATH": "/usr/bin", "_PYI_ARCHIVE_FILE": "a", "_MEIPASS2": "b"}
+        removed = at.scrub_pyinstaller_runtime_environment(target)
+        self.assertEqual(sorted(removed), ["_MEIPASS2", "_PYI_ARCHIVE_FILE"])
+        self.assertEqual(target, {"PATH": "/usr/bin"})
+
+    def test_scrub_is_happy_when_there_is_nothing_to_remove(self):
+        self.assertEqual(at.scrub_pyinstaller_runtime_environment({}), [])
+
+    def test_scrub_on_the_real_environment_leaves_it_usable(self):
+        with mock.patch.dict(os.environ, {"_PYI_PARENT_PROCESS_LEVEL": "0"}, clear=False):
+            at.scrub_pyinstaller_runtime_environment()
+            self.assertNotIn("_PYI_PARENT_PROCESS_LEVEL", os.environ)
+            self.assertTrue(at.restart_environment())
+
+
+# ---------------------------------------------------------------------------
 # Downloading
 # ---------------------------------------------------------------------------
 class DownloadFileTests(unittest.TestCase):
@@ -524,6 +577,25 @@ class WindowsSwapScriptTests(unittest.TestCase):
         script = at.build_windows_swap_script("a.exe", "b.exe", wait_seconds=7)
         self.assertIn('set "TRIES=7"', script)
 
+    def test_backup_is_taken_before_the_new_build_is_copied_in(self):
+        # After the swap the target *is* the new build, so a later copy would
+        # back up the wrong file and leave nothing to roll back to.
+        backup = self.script.index('copy /Y "%TARGET%" "%TARGET%.old"')
+        swap = self.script.index('copy /Y "%NEW%" "%TARGET%"')
+        self.assertLess(backup, swap)
+
+    def test_restart_clears_the_onefile_environment(self):
+        for name in at.PYINSTALLER_RUNTIME_ENV_VARS:
+            self.assertIn(f'set "{name}=', self.script,
+                          f"{name} must not be handed to the new build")
+
+    def test_restart_also_asks_the_bootloader_for_a_reset(self):
+        self.assertIn('set "PYINSTALLER_RESET_ENVIRONMENT=1"', self.script)
+
+    def test_an_aborted_swap_still_brings_the_app_back(self):
+        give_up = self.script.split(":giveup", 1)[1]
+        self.assertIn('start "" "%TARGET%"', give_up)
+
 
 class PosixSwapScriptTests(unittest.TestCase):
     def test_waits_for_the_pid_then_swaps_and_relaunches(self):
@@ -533,6 +605,12 @@ class PosixSwapScriptTests(unittest.TestCase):
         self.assertIn('nohup "$TARGET"', script)
         self.assertIn("chmod +x", script)
         self.assertIn("PID=4242", script)
+
+    def test_relaunch_clears_the_onefile_environment(self):
+        script = at.build_posix_swap_script("/tmp/new", "/opt/AutoTyper", 1)
+        for name in at.PYINSTALLER_RUNTIME_ENV_VARS:
+            self.assertIn(f"unset {name}\n", script)
+        self.assertIn("export PYINSTALLER_RESET_ENVIRONMENT=1", script)
 
     def test_platform_dispatch(self):
         windows = at.build_swap_script("n", "t", 1, windows=True)
@@ -591,6 +669,21 @@ class InstallUpdateTests(unittest.TestCase):
             at.launch_swap_script(self.dir / "s.sh", windows=False)
         _, kwargs = popen.call_args
         self.assertTrue(kwargs.get("start_new_session"))
+
+    def test_launch_hands_the_script_a_scrubbed_environment(self):
+        """The swap script must not describe *our* unpacked files: it starts
+        the next build, and inheriting them breaks that build's start-up."""
+        stale = {name: "stale" for name in at.PYINSTALLER_RUNTIME_ENV_VARS}
+        for windows in (True, False):
+            with mock.patch.object(at.subprocess, "Popen") as popen, \
+                    mock.patch.dict(os.environ, stale, clear=False):
+                at.launch_swap_script(self.dir / ("s.bat" if windows else "s.sh"),
+                                      windows=windows)
+            _, kwargs = popen.call_args
+            env = kwargs.get("env")
+            self.assertIsInstance(env, dict)
+            for name in at.PYINSTALLER_RUNTIME_ENV_VARS:
+                self.assertNotIn(name, env)
 
 
 # ---------------------------------------------------------------------------
@@ -701,7 +794,7 @@ class GuiUpdateAnnouncementTests(unittest.TestCase):
         self.messagebox.askyesno = lambda *args, **kwargs: False
         types.MethodType(self.mod.AutoTyperApp._on_update_available, self.app)(self._release())
         self.assertEqual(self.app.status_label.kw["text"],
-                         "Status: Update available — v1.3.0 (you have v1.1.1)")
+                         "Status: Update available — v1.3.0 (you have v%s)" % at.APP_VERSION)
         # The offer now lives in Settings: the download button is relabelled
         # with the version it will fetch and the hint names it too.
         self.assertEqual(self.app._available_version, "1.3.0")
