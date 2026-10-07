@@ -40,18 +40,23 @@ PALETTE = ("#1E3A8A", "#3B82F6", "#F8FAFC")
 
 # Findings are published as GitHub workflow annotations: on hosted runners the
 # raw log and the uploaded artifacts are not always reachable, while the
-# annotation API is. The payload is zlib+base64 (one line) so it stays small.
+# annotation API is. GitHub truncates an annotation message at 4096 characters,
+# so payloads are zlib+base64 chunked well below that and reassembled by
+# tools/read_probe_annotations.py.
 ANNOTATION_PREFIX = "AUTOTYPER-PROBE:"
-CHUNK = 45000
+ANNOTATION_CHUNK = 3800     # characters per annotation, under the 4096 limit
 
 
-def emit_annotation(payload: dict, level: str = "error") -> None:
+def emit_annotation(name: str, payload, level: str = "error") -> None:
     """Print ``payload`` as chunked workflow annotations."""
     blob = json.dumps(payload, separators=(",", ":"), default=str).encode()
     encoded = base64.b64encode(zlib.compress(blob, 9)).decode()
-    chunks = [encoded[i:i + CHUNK] for i in range(0, len(encoded), CHUNK)] or [""]
+    chunks = [encoded[i:i + ANNOTATION_CHUNK]
+              for i in range(0, len(encoded), ANNOTATION_CHUNK)] or [""]
     for index, chunk in enumerate(chunks, start=1):
-        print(f"::{level}::{ANNOTATION_PREFIX}{index}/{len(chunks)}:{chunk}", flush=True)
+        print(f"::{level}::{ANNOTATION_PREFIX}{name}:{index}/{len(chunks)}:{chunk}",
+              flush=True)
+    return len(chunks)
 
 
 
@@ -115,16 +120,20 @@ def image_from_pixels(pixels: dict, width: int, height: int):
     return image
 
 
-def read_back_grid(image, width, height, step: int = 4):
+def read_back_grid(image, width, height, step: int = 2):
     """Sample the whole image (every ``step`` pixels) as ``{x,y: colour}``."""
     return {f"{x},{y}": normalise_pixel(image.get(x, y))
             for y in range(0, height, step) for x in range(0, width, step)}
 
 
-def png_base64(image) -> str:
-    """A compact PNG of ``image``, base64 encoded."""
+def thumbnail_base64(image, scale: int, colours: int = 32) -> str:
+    """A small PNG of ``image``, base64 encoded, for the annotation budget."""
     from PIL import Image
-    small = image.convert("P", palette=Image.ADAPTIVE, colors=64)
+    small = image.convert("RGB")
+    if scale > 1:
+        small = small.resize((max(1, small.width // scale),
+                              max(1, small.height // scale)), Image.NEAREST)
+    small = small.convert("P", palette=Image.ADAPTIVE, colors=colours)
     buffer = io.BytesIO()
     small.save(buffer, format="PNG", optimize=True)
     return base64.b64encode(buffer.getvalue()).decode()
@@ -178,18 +187,18 @@ def main(argv=None):
     images = {}
     try:
         grid = read_back_grid(picker._square_image, picker.width, picker.height)
-        images["tk_stored_field"] = png_base64(
-            image_from_pixels(grid, picker.width, picker.height))
+        images["tk_stored_field_half"] = thumbnail_base64(
+            image_from_pixels(grid, picker.width, picker.height), 2)
         expected_grid = {f"{x},{y}": at.gradient_square_colour(x, y, value)
-                         for y in range(0, picker.height, 4)
-                         for x in range(0, picker.width, 4)}
-        images["model_field"] = png_base64(
-            image_from_pixels(expected_grid, picker.width, picker.height))
+                         for y in range(0, picker.height, 2)
+                         for x in range(0, picker.width, 2)}
+        images["model_field_half"] = thumbnail_base64(
+            image_from_pixels(expected_grid, picker.width, picker.height), 2)
         shot = out / "picker.png"
         if shot.is_file():
             from PIL import Image
             with Image.open(shot) as grabbed:
-                images["screenshot"] = png_base64(grabbed)
+                images["screenshot_third"] = thumbnail_base64(grabbed, 3, colours=64)
     except Exception as err:                       # pragma: no cover - reporting only
         images["error"] = f"{type(err).__name__}: {err}"
 
@@ -197,7 +206,8 @@ def main(argv=None):
                ("tk", "tcl", "shade", "field_actual", "field_expected",
                 "field_mismatches", "shade_strip_actual", "screenshot")}
     print(json.dumps(printed, indent=2))
-    emit_annotation({"report": printed, "images": images}, "error")
+    emit_annotation("report", {"report": printed}, "error")
+    emit_annotation("images", images, "notice")
     root.destroy()
 
     if mismatches:
