@@ -18,6 +18,11 @@ on:
   push:
     branches:
       - main
+    paths:
+      - "tools/render_picker_probe.py"
+      - "auto_typer.py"
+      - "AutoTyper.spec"
+      - ".github/workflows/diagnostics.yml"
 
 permissions:
   contents: read
