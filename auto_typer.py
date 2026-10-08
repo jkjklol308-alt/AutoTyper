@@ -2582,21 +2582,34 @@ def launch_swap_script(script_path: Path, *, windows: bool = None) -> None:
 
     No file this process owns is handed to the script: the script writes its
     own progress to the swap log, and a handle held here would make that write
-    fail. Its three standard handles are pointed at the null device rather than
-    left unset — a detached ``cmd.exe`` with no valid handles is not something
-    to rely on, and it guarantees nothing of ours can be written to from the
-    process that outlives us.
+    fail. Its three standard handles point at the null device rather than being
+    left unset, so nothing of ours can be written to from the process that
+    outlives us.
+
+    On Windows the script gets its **own hidden console**. `cmd.exe` is happiest
+    with one — the first version spawned it fully detached and the script then
+    froze mid-loop on a real runner (the process alive, the swap log stuck
+    after "waiting for the start-up signal (1 of 20)"), while the identical
+    script run in the foreground, which has a console, finished both of its
+    outcomes. A new console that is never shown gives the script the conditions
+    it was written and tested for without putting a window in the user's face.
     """
     on_windows = (os.name == "nt") if windows is None else windows
     env = restart_environment()
     if on_windows:
         creationflags = 0
-        for flag in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP"):
+        for flag in ("CREATE_NEW_CONSOLE", "CREATE_NEW_PROCESS_GROUP"):
             creationflags |= getattr(subprocess, flag, 0)
+        startupinfo = None
+        if hasattr(subprocess, "STARTUPINFO"):
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+            startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
         process = subprocess.Popen(
             ["cmd", "/c", str(script_path)], close_fds=True, env=env,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, creationflags=creationflags)
+            stderr=subprocess.DEVNULL, creationflags=creationflags,
+            startupinfo=startupinfo)
     else:
         process = subprocess.Popen(
             ["/bin/sh", str(script_path)], start_new_session=True, env=env,

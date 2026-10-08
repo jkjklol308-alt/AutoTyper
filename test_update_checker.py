@@ -735,6 +735,33 @@ class InstallUpdateTests(unittest.TestCase):
         self.assertEqual(args[0][0], "cmd")
         self.assertIn("creationflags", kwargs)   # detached: the swap outlives this process
 
+    def test_launch_gives_the_script_its_own_console_on_windows(self):
+        # Spawned fully detached, cmd.exe froze mid-loop on a real runner (the
+        # process alive, the swap log stuck after the first wait) while the
+        # identical script run in the foreground - which has a console -
+        # finished both of its outcomes.
+        with mock.patch.object(at.subprocess, "CREATE_NEW_CONSOLE", 0x10, create=True), \
+                mock.patch.object(at.subprocess, "Popen") as popen:
+            at.launch_swap_script(self.dir / "s.bat", windows=True)
+        _, kwargs = popen.call_args
+        self.assertEqual(kwargs["creationflags"] & 0x10, 0x10)
+
+    def test_launch_never_shows_the_console_window(self):
+        class _StartupInfo:
+            def __init__(self):
+                self.dwFlags = 0
+                self.wShowWindow = None
+
+        with mock.patch.object(at.subprocess, "STARTUPINFO", _StartupInfo, create=True), \
+                mock.patch.object(at.subprocess, "STARTF_USESHOWWINDOW", 0x1, create=True), \
+                mock.patch.object(at.subprocess, "SW_HIDE", 0, create=True), \
+                mock.patch.object(at.subprocess, "Popen") as popen:
+            at.launch_swap_script(self.dir / "s.bat", windows=True)
+        _, kwargs = popen.call_args
+        info = kwargs["startupinfo"]
+        self.assertEqual(info.dwFlags & 0x1, 0x1)
+        self.assertEqual(info.wShowWindow, 0)
+
     def test_launch_uses_a_new_session_elsewhere(self):
         with mock.patch.object(at.subprocess, "Popen") as popen:
             at.launch_swap_script(self.dir / "s.sh", windows=False)

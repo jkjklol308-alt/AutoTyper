@@ -226,14 +226,24 @@ jobs:
                            -ErrorAction SilentlyContinue |
                            Where-Object { $_.CommandLine -like "*AutoTyper-update.bat*" } |
                            Select-Object -ExpandProperty ProcessId)
+              # What the script is waiting for, if it stops moving: its own
+              # children (ping, tasklist, find, the new build) name the culprit.
+              $children = @()
+              foreach ($script_pid in $scripts) {
+                $children += @(Get-CimInstance Win32_Process `
+                               -Filter "ParentProcessId=$script_pid" `
+                               -ErrorAction SilentlyContinue |
+                               ForEach-Object { "$($_.Name):$($_.ProcessId)" })
+              }
               $bytes = (Get-Item $log -ErrorAction SilentlyContinue).Length
               $text = $null
               if (Test-Path $result) { $text = Get-Content $result -Raw -ErrorAction SilentlyContinue }
-              $fingerprint = "$scripts|$bytes|$text"
+              $fingerprint = "$scripts|$children|$bytes|$text"
               if ($fingerprint -ne $seen) {
                 $seen = $fingerprint
                 $state["trace"] += [ordered]@{ t = [int]$sw.Elapsed.TotalSeconds
                                                script_pids = $scripts
+                                               children = $children
                                                log_bytes = $bytes
                                                verdict = "$text" }
               }
