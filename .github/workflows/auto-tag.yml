@@ -1,0 +1,80 @@
+name: Tag new versions
+
+# Why this exists: the release workflow (release.yml) only runs when a tag such
+# as v1.2.1 is pushed, and nothing created that tag when APP_VERSION was bumped.
+# Version 1.2.1 was merged to main without a tag, so no release was published
+# and the in-app updater kept reporting 1.2.0 as the latest version.
+#
+# This workflow runs on every push to main that touches the application source.
+# If APP_VERSION names a version whose tag does not exist yet, it creates the
+# tag on that commit and starts the release workflow for it. Existing tags are
+# never moved or overwritten.
+#
+# Note: a tag pushed with the default GITHUB_TOKEN does not trigger other
+# workflows, which is why release.yml is started explicitly with workflow_dispatch.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "auto_typer.py"
+      - ".github/workflows/auto-tag.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: auto-tag
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read APP_VERSION
+        id: app
+        shell: bash
+        run: |
+          VERSION=$(python3 -c "import re,pathlib;print(re.search(r'^APP_VERSION = \"([^\"]+)\"', pathlib.Path('auto_typer.py').read_text(encoding='utf-8'), re.M).group(1))")
+          if [ -z "$VERSION" ]; then
+            echo "::error::could not read APP_VERSION from auto_typer.py"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "APP_VERSION is $VERSION"
+
+      - name: Create the tag if it does not exist
+        id: create
+        shell: bash
+        env:
+          TAG: ${{ steps.app.outputs.tag }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists; nothing to create."
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "AutoTyper $TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/$TAG"
+          echo "Created and pushed $TAG at $GITHUB_SHA"
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+      - name: Start the release workflow for the tag
+        if: steps.create.outputs.created == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.app.outputs.tag }}
+        run: |
+          gh workflow run release.yml --ref "$TAG"
+          echo "Started Build AutoTyper.exe for $TAG"

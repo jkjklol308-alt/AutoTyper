@@ -153,4 +153,4 @@ pip install pyinstaller pynput
 pyinstaller AutoTyper.spec --noconfirm     # -> dist/AutoTyper.exe
 ```
 
-Pushing a tag that matches `APP_VERSION` (for example `v1.1.1`) makes GitHub Actions run the tests, build the executable and attach it to a release automatically — see `.github/workflows/release.yml`. Update `APP_VERSION` in `auto_typer.py` and use the matching `v...` tag when publishing a release.
+Pushing a tag that matches `APP_VERSION` (for example `v1.1.1`) makes GitHub Actions run the tests, build the executable and attach it to a release automatically — see `.github/workflows/release.yml`. To publish a release, update `APP_VERSION` in `auto_typer.py` and merge it to `main`. `.github/workflows/auto-tag.yml` then creates the matching `v...` tag (if it does not already exist) and starts the build, which publishes the release. You can also push the tag yourself; existing tags are never moved.
