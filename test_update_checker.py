@@ -1162,10 +1162,10 @@ class SwapVerificationScriptTests(unittest.TestCase):
         self.assertIn("rolled-back v%VERSION%", give_up)
         self.assertIn('start "" "%TARGET%"', give_up)
 
-    def test_clearing_a_variable_needs_its_closing_quote(self):
-        # `set "NAME=` (no closing quote) creates a variable whose *name*
-        # starts with a quote and leaves the real one in place, so the new
-        # build would still inherit this process's unpacked-file paths.
+    def test_the_onefile_variables_are_deleted_not_just_blanked(self):
+        # `set "NAME="` is cmd.exe's documented form for deleting a variable,
+        # and the CI job runs these exact lines on a real cmd.exe to prove the
+        # new build cannot inherit this process's unpacked-file paths.
         for name in at.PYINSTALLER_RUNTIME_ENV_VARS:
             self.assertIn(f'set "{name}="\r\n', self.script)
 

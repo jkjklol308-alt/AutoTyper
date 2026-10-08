@@ -18,6 +18,7 @@ on:
   push:
     branches:
       - main
+      - arena/25b58ad1-autotyper   # TEMPORARY: verify v1.1.3 on this branch
     paths:
       - "tools/render_picker_probe.py"
       - "tools/update_restart_probe.py"
@@ -85,37 +86,46 @@ jobs:
         # failing. The onefile environment handling under test is identical.
         run: pyinstaller --onefile --console --noconfirm --name AutoTyperProbe --distpath dist-probe auto_typer.py
 
-      - name: Prove that clearing a variable needs cmd.exe's closing quote
+      - name: Prove the swap script's clearing lines empty the onefile environment
         shell: python
         run: |
-          # The swap script clears PyInstaller's onefile variables with
-          # `set "NAME="`. Without the closing quote that line only creates a
-          # variable whose *name* starts with a quote, and the real variable
-          # (this process's unpacked-file paths) survives into the build being
-          # started — the bug behind "Error loading Python DLL" after an update.
+          # "Error loading Python DLL" after an update comes from the new build
+          # inheriting the previous process's unpacked-file paths. The swap
+          # script clears those variables before starting it, and this runs the
+          # *generated* lines on a real cmd.exe to show that they really do.
           import pathlib
           import subprocess
           import sys
 
-          bat = pathlib.Path("unset-quoting.bat")
-          bat.write_text(
-              '@echo off\r\n'
-              'set "FOO=bar"\r\n'
-              'set "FOO=\r\n'          # the broken form: no closing quote
-              'echo broken:%FOO%\r\n'
-              'set "BAR=baz"\r\n'
-              'set "BAR="\r\n'          # the correct form
-              'echo fixed:[%BAR%]\r\n',
-              encoding="utf-8",
-          )
-          out = subprocess.run(["cmd", "/c", str(bat)], capture_output=True,
-                               text=True).stdout
+          sys.path.insert(0, ".")
+          import auto_typer as at
+
+          script = at.build_windows_swap_script(r"C:\Temp\new.exe", r"C:\Temp\target.exe",
+                                                version="1.0.0")
+          clearing = [line for line in script.splitlines()
+                      if line.startswith('set "') and "=" in line
+                      and (line.startswith('set "_PYI') or line.startswith('set "_MEI')
+                           or line.startswith('set "PYINSTALLER'))]
+          if not clearing:
+              sys.exit("the generated swap script clears nothing")
+
+          body = ["@echo off"]
+          # What the running onefile app has in its environment...
+          body += [f'set "{name}=stale-value"' for name in at.PYINSTALLER_RUNTIME_ENV_VARS]
+          # ...then exactly the lines the swap script uses, verbatim.
+          body += clearing
+          body += [f'echo {name}=[%{name}%]' for name in at.PYINSTALLER_RUNTIME_ENV_VARS]
+          body += ['echo RESET=[%PYINSTALLER_RESET_ENVIRONMENT%]']
+
+          bat = pathlib.Path("onefile-env.bat")
+          bat.write_text("\r\n".join(body) + "\r\n", encoding="utf-8")
+          out = subprocess.run(["cmd", "/c", str(bat)], capture_output=True, text=True).stdout
           print(out)
-          if "broken:bar" not in out:
-              sys.exit("cmd.exe cleared the variable without a closing quote - the "
-                       "regression test needs revisiting")
-          if "fixed:[]" not in out:
-              sys.exit("set \"NAME=\" did not clear the variable")
+          for name in at.PYINSTALLER_RUNTIME_ENV_VARS:
+              if f"{name}=[]" not in out:
+                  sys.exit(f"{name} survived the swap script's clearing lines")
+          if "RESET=[1]" not in out:
+              sys.exit("the reset request is not handed to the new build")
 
       - name: Build the ends of a real self-update (old, new and broken builds)
         shell: bash

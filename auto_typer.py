@@ -2360,10 +2360,9 @@ def build_windows_swap_script(new_exe, target_exe, wait_seconds: int = 120,
         # file paths from this process, and an explicit reset in case something
         # else re-adds them.
         f'set "{PYINSTALLER_RESET_ENV_VAR}=1"\r\n'
-        # `set "NAME="` (with the closing quote) is what *deletes* a variable
-        # in cmd.exe. Without it the line only creates a variable whose name
-        # starts with a quote, leaving the real one — this process's unpacked
-        # file paths — in place for the build we are about to start.
+        # `set "NAME="` is cmd.exe's documented way to delete a variable: the
+        # quotes keep stray whitespace out of the value and an empty value
+        # removes the variable from the environment the next build inherits.
         + "".join(f'set "{name}="\r\n' for name in PYINSTALLER_RUNTIME_ENV_VARS)
         + 'for %%F in ("%TARGET%") do set "IMAGE=%%~nxF"\r\n'
         'for %%D in ("%RESULT%") do set "DIR=%%~dpD"\r\n'
