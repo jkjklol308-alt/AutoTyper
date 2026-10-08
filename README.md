@@ -48,7 +48,8 @@ From v1.1.2 on, updating restarts the app with the same clean environment a
 double-click gives it; from **v1.1.3** the restart is verified and, if the new
 build never comes up, rolled back; and from **v1.1.4** the spare copy that makes
 the rollback possible is deleted again as soon as the new build reports its
-window:
+window. **v1.2.0** adds the built-in guide and drops the settings window's
+"Live preview" panel, which only repeated what the app already showed:
 
 | How you are running | What updating does |
 | --- | --- |
@@ -114,10 +115,10 @@ python auto_typer.py --benchmark --wpm 100 --seed 42 --csv trace.csv --coding-mo
 ## Running the Test Suite
 
 ```bash
-python -m unittest test_auto_typer.py test_custom_colours.py test_update_checker.py
+python -m unittest test_auto_typer.py test_custom_colours.py test_update_checker.py test_guide.py
 ```
 
-`test_auto_typer.py` replays planned traces through a virtual editor to prove the emitted keystrokes reproduce the source text exactly, `test_update_checker.py` covers the release lookup, the download/verification path and the self-update swap, and `test_custom_colours.py` exercises the colour picker through a miniature `tkinter` stub so the suite runs with no display.
+`test_auto_typer.py` replays planned traces through a virtual editor to prove the emitted keystrokes reproduce the source text exactly, `test_update_checker.py` covers the release lookup, the download/verification path and the self-update swap, `test_custom_colours.py` exercises the colour picker through a miniature `tkinter` stub so the suite runs with no display, and `test_guide.py` checks the built-in guide's wording and window the same way.
 
 ## Custom UI Colours
 
@@ -128,8 +129,12 @@ Both panels above are drawn from the app's own colour maths: while you hold a co
 The header keeps a single **⚙ Settings** button — palettes, window behaviour and updates all live inside it:
 
 - **Custom “UI colour” section**: press **🎨 New colours…** to open the editor, which uses the *Microsoft Paint “Edit colours” style gradient picker* — a big colour field (the whole rainbow left to right, pure colours fading to greyscale towards the bottom, drawn at the current shade) beside a white‑to‑black shade strip. Click or **drag** anywhere in the field to pick the colour itself — the colour you have chosen is always the pixel under the marker — then slide the strip to lighten or darken it; every intermediate colour is reachable, not just a fixed set of swatches.
-- Choose a **Primary**, **Accent** and **Background** colour (drag in the gradient or type `#RRGGBB`), watch the live preview, give the set a name, and **Save colours**.
+- Choose a **Primary**, **Accent** and **Background** colour (drag in the gradient or type `#RRGGBB`) — the colours are applied to the whole app as you pick them, so there is no separate preview to watch — then give the set a name and **Save colours**.
 - Saved palettes appear in the palette grid marked with a ★, are applied instantly, survive restarts (stored in `~/.autotyper_settings.json`; settings from earlier releases under the old file name are picked up automatically), and can be re-opened for editing by double-clicking a card or pressing **Edit selected**. **Delete selected** removes one; built-in palettes cannot be deleted. Up to 16 custom palettes are kept.
+
+## Built-in guide
+
+**⚙ Settings → Guide → 📖 Open guide…** opens a separate window that lists every button and setting in plain language: what *Target speed*, *Base typo rate*, *Speed definition*, *Countdown*, *Editor indentation*, *Pascal coding mode*, *Verify and repair*, *Deterministic seed* and the text/benchmark/start/stop controls do, plus every control inside Settings itself. Nothing in it changes your settings, it follows the palette you have selected, and — because it is its own form rather than a panel — it stays open when you close Settings, so you can read it while you type.
 
 ## Version numbering
 

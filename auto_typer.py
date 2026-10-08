@@ -47,6 +47,11 @@ A next-generation human typing simulator implementing:
      shade strip — that lets you click or drag to any colour, choose a
      primary, accent and background colour, name the result and save it
      alongside the built-in palettes.
+ 11. Built-in Guide (v1.2.0): a separate window, opened from ⚙ Settings,
+     that explains every button and setting in plain language. The "live
+     preview" panel that used to sit at the bottom of the settings window
+     has been removed: a palette is applied to the whole app the moment you
+     click it, so the preview only repeated what was already on screen.
 
 Usage:
     python auto_typer.py --benchmark --wpm 110 --mode net --coding-mode --file code.pas
@@ -85,7 +90,7 @@ try:
 except ImportError:
     tk = messagebox = ttk = None
 
-APP_VERSION = "1.1.4"
+APP_VERSION = "1.2.0"
 APP_NAME = "AutoTyper"
 GITHUB_REPO = "jkjklol308-alt/AutoTyper"
 EXE_ASSET_NAME = "AutoTyper.exe"
@@ -3118,6 +3123,127 @@ INDENT_LABELS = {
 }
 
 
+# The built-in guide. Each section is (heading, ((control, what it does), ...))
+# so the wording can be read — and tested — without a window ever opening.
+GUIDE_WINDOW_TITLE = "AutoTyper Guide — what every button does"
+
+GUIDE_INTRO = (
+    "Paste your text, press Start, then click into your editor: AutoTyper "
+    "counts down and types it for you. Below is what every button and "
+    "setting does — nothing in this window changes your settings."
+)
+
+GUIDE_SECTIONS: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
+    ("Main window — typing settings", (
+        ("Target speed (WPM)",
+         "How fast AutoTyper aims to type, from 20 to 150 words per minute. "
+         "Type a number or drag the slider; a value outside the range is "
+         "corrected as soon as you leave the box."),
+        ("Base typo rate (%)",
+         "How often a letter is mistyped before being noticed and corrected: "
+         "0.01% is near-perfect, 100% is chaos. Around 1–3% looks human."),
+        ("Speed definition",
+         "Net counts thinking pauses and corrections as part of the speed, so "
+         "the whole run averages the WPM you set. Gross counts keystrokes only, "
+         "so the typing bursts are quicker and the pauses come on top."),
+        ("Countdown (seconds)",
+         "How long AutoTyper waits after you press Start before the first key "
+         "goes down — 1 to 30 seconds, enough time to click into your editor."),
+        ("Editor indentation",
+         "What AutoTyper does about the indentation your editor adds by itself. "
+         "Off types your text exactly as written; Copy removes what the editor "
+         "copied from the line above; Smart predicts the indentation opened by "
+         ":, {, ( or a Pascal begin and is the right choice for code; Fixed "
+         "removes the number of spaces set in the box below."),
+        ("Fixed indent width",
+         "How many spaces the Fixed width mode removes after each new line "
+         "(0 to 16). Match it to your editor's tab size."),
+        ("Pascal coding mode",
+         "Types structured Pascal the way a programmer does: it writes begin, "
+         "opens a line, fills the body in, then steps past the closing end. "
+         "Switch it off for plain prose."),
+        ("Verify and repair target editor",
+         "After typing, AutoTyper copies the document back, compares it with "
+         "your text and repairs any difference it finds, so what you asked for "
+         "is what ends up on screen."),
+        ("Deterministic seed",
+         "Tick it to make a run repeatable: the same seed gives the same typos, "
+         "pauses and timing every time, which is handy for comparing settings. "
+         "Change the number beside it for a different — but still repeatable — "
+         "run."),
+    )),
+    ("Main window — text & buttons", (
+        ("Source code / text input",
+         "The box you type or paste the text into. Ctrl+A selects everything "
+         "in it."),
+        ("Clear",
+         "Empties the text box."),
+        ("Paste clipboard",
+         "Replaces the contents of the text box with whatever is on your "
+         "clipboard."),
+        ("Benchmark",
+         "Plans the whole run without pressing a single key and prints the "
+         "timing statistics to the terminal, so you can try a speed before "
+         "typing for real."),
+        ("Start AutoTyper",
+         "Starts the countdown, then types your text into whichever window has "
+         "the keyboard focus."),
+        ("Stop",
+         "Stops typing at once and leaves the rest of the text untyped."),
+        ("Status line",
+         "What AutoTyper is doing right now — ready, counting down, typing, "
+         "finished — plus any update news."),
+        ("Progress bar",
+         "How much of the current run has been typed."),
+        ("⚙ Settings",
+         "Opens Appearance & Window Settings, where the palettes, the window "
+         "behaviour, the update controls and this guide all live."),
+    )),
+    ("⚙ Settings — colours", (
+        ("Colour palette",
+         "Click a card to apply that palette to the whole app immediately. "
+         "Palettes you have saved yourself are marked with a ★."),
+        ("🎨 New colours…",
+         "Opens the Paint-style colour editor: pick a primary, accent and "
+         "background colour on the gradient, name the set and save it with the "
+         "built-in palettes."),
+        ("Edit selected",
+         "Reopens the custom palette you have selected so you can change its "
+         "colours or its name."),
+        ("Delete selected",
+         "Deletes the custom palette you have selected. Built-in palettes "
+         "cannot be deleted."),
+        ("Double-click a ★ card",
+         "A shortcut for editing one of your own palettes."),
+    )),
+    ("⚙ Settings — window", (
+        ("Keep AutoTyper above other applications",
+         "Keeps the AutoTyper window on top of everything else, so it does not "
+         "disappear behind your editor the moment you click into it."),
+    )),
+    ("⚙ Settings — updates & downloads", (
+        ("Check for updates now",
+         "Looks on GitHub for a newer release there and then, instead of "
+         "waiting for the quiet check the app does when it opens."),
+        ("⬇ Download latest AutoTyper.exe",
+         "Downloads the newest published executable into your Downloads folder. "
+         "When an update is available the button names the version it will "
+         "fetch, and updating is always optional."),
+        ("🗒 Open update log",
+         "Opens the log that records every update and restart — the first place "
+         "to look if an update ever fails."),
+    )),
+    ("⚙ Settings — guide", (
+        ("📖 Open guide…",
+         "Opens this window: a plain-language list of every button and setting. "
+         "It stays open when you close Settings, so you can read it while you "
+         "work."),
+        ("Close",
+         "Closes the settings window."),
+    )),
+)
+
+
 @dataclass(frozen=True)
 class RunConfig:
     wpm: int
@@ -3580,6 +3706,164 @@ class CustomPaletteEditor(_TkToplevel):
         self.destroy()
 
 
+class GuideWindow(_TkToplevel):
+    """Standalone window that explains every button and setting.
+
+    Like the custom colour editor this is its own form rather than another
+    panel inside Settings, so it can stay open beside the typer while you
+    work. The wording itself lives in `GUIDE_SECTIONS` (with `GUIDE_INTRO`),
+    which keeps it readable — and testable — without a display.
+    """
+
+    def __init__(self, master, colours: Dict[str, str], *, topmost: bool = False,
+                 sections=GUIDE_SECTIONS, intro: str = GUIDE_INTRO):
+        super().__init__(master)
+        c = colours
+        self._scroller = None
+        self._frames = []      # everything painted with the background colour
+        self._headings = []    # section headings (primary)
+        self._names = []       # control names    (foreground)
+        self._bodies = []      # descriptions     (muted)
+        self._accent_button = None
+
+        self.title_text = GUIDE_WINDOW_TITLE
+        self.title(self.title_text)
+        self.configure(background=c["background"])
+        self.geometry("660x760")
+        self.minsize(520, 420)
+        try:
+            self.transient(master)
+        except tk.TclError:
+            pass
+        if topmost:
+            try:
+                self.wm_attributes("-topmost", True)
+            except tk.TclError:
+                pass
+
+        footer = tk.Frame(self, bg=c["background"], padx=18, pady=12)
+        footer.pack(side="bottom", fill="x")
+        self._accent_button = tk.Button(
+            footer, text="Close", command=self.destroy, relief="flat",
+            bg=c["accent"], fg=c["accent_foreground"],
+            activebackground=c["primary"], activeforeground=c["button_foreground"],
+            padx=18, pady=5, font=("Segoe UI", 9, "bold"))
+        self._accent_button.pack(side="right")
+        self._frames.append(footer)
+
+        scroller = tk.Canvas(self, bg=c["background"], highlightthickness=0, bd=0)
+        scrollbar = ttk.Scrollbar(self, orient="vertical", command=scroller.yview,
+                                  style="App.Vertical.TScrollbar")
+        scroller.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        scroller.pack(side="left", fill="both", expand=True)
+        outer = tk.Frame(scroller, bg=c["background"], padx=22, pady=18)
+        body_id = scroller.create_window((0, 0), window=outer, anchor="nw")
+        outer.bind("<Configure>",
+                   lambda event: scroller.configure(scrollregion=scroller.bbox("all")))
+        scroller.bind("<Configure>",
+                      lambda event: scroller.itemconfigure(body_id, width=event.width))
+        self._scroller = scroller
+        self._frames.extend((scroller, outer))
+
+        title = tk.Label(outer, text="AutoTyper Guide", bg=c["background"],
+                         fg=c["primary"], font=("Segoe UI", 18, "bold"))
+        title.pack(anchor="w")
+        subtitle = tk.Label(outer, text=intro, bg=c["background"], fg=c["muted"],
+                            font=("Segoe UI", 9), justify="left", anchor="w",
+                            wraplength=560)
+        subtitle.pack(anchor="w", pady=(2, 14))
+        self._frames.extend((title, subtitle))
+        self._headings.append(title)
+        self._bodies.append(subtitle)
+
+        for heading, entries in sections:
+            heading_label = tk.Label(outer, text=heading, bg=c["background"],
+                                     fg=c["primary"], font=("Segoe UI", 11, "bold"),
+                                     justify="left", anchor="w")
+            heading_label.pack(anchor="w", pady=(10, 4))
+            self._frames.append(heading_label)
+            self._headings.append(heading_label)
+            for name, description in entries:
+                row = tk.Frame(outer, bg=c["background"])
+                row.pack(fill="x", pady=(0, 9))
+                self._frames.append(row)
+                name_label = tk.Label(row, text=name, bg=c["background"],
+                                      fg=c["foreground"], font=("Segoe UI", 10, "bold"),
+                                      justify="left", anchor="w", wraplength=560)
+                name_label.pack(anchor="w")
+                self._frames.append(name_label)
+                self._names.append(name_label)
+                body_label = tk.Label(row, text=description, bg=c["background"],
+                                      fg=c["muted"], font=("Segoe UI", 9),
+                                      justify="left", anchor="w", wraplength=560)
+                body_label.pack(anchor="w", pady=(1, 0))
+                self._frames.append(body_label)
+                self._bodies.append(body_label)
+
+        # The wheel is bound to the window's own widgets instead of bind_all,
+        # because Settings owns the global binding and must keep it.
+        self._bind_wheel(scroller)
+        self._bind_wheel(outer)
+        for widget in self._frames:
+            self._bind_wheel(widget)
+
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+    # -- internals -----------------------------------------------------
+    def _bind_wheel(self, widget):
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            try:
+                widget.bind(sequence, self._on_wheel, add="+")
+            except tk.TclError:
+                pass
+
+    def _on_wheel(self, event):
+        if self._scroller is None:
+            return
+        number = getattr(event, "num", 0)
+        if number == 4:
+            delta = -1
+        elif number == 5:
+            delta = 1
+        else:
+            delta = -1 if getattr(event, "delta", 0) > 0 else 1
+        self._scroller.yview_scroll(delta, "units")
+
+    def apply_colours(self, colours: Dict[str, str]) -> None:
+        """Repaint the guide after the palette changed (safe once closed)."""
+        c = colours
+        for widget in self._frames:
+            try:
+                widget.configure(bg=c["background"])
+            except tk.TclError:
+                pass
+        for widget in self._headings:
+            try:
+                widget.configure(bg=c["background"], fg=c["primary"])
+            except tk.TclError:
+                pass
+        for widget in self._names:
+            try:
+                widget.configure(bg=c["background"], fg=c["foreground"])
+            except tk.TclError:
+                pass
+        for widget in self._bodies:
+            try:
+                widget.configure(bg=c["background"], fg=c["muted"])
+            except tk.TclError:
+                pass
+        try:
+            self.configure(background=c["background"])
+            if self._accent_button is not None:
+                self._accent_button.configure(
+                    bg=c["accent"], fg=c["accent_foreground"],
+                    activebackground=c["primary"],
+                    activeforeground=c["button_foreground"])
+        except tk.TclError:
+            pass
+
+
 class AutoTyperApp(_TkBase):
     """The V2 desktop interface.
 
@@ -3613,7 +3897,9 @@ class AutoTyperApp(_TkBase):
         self._palette_grid = None
         self._custom_hint = None
         self._custom_editor = None
-        self._preview_widgets = {}
+        self._guide_window = None
+        self._guide_hint = None
+        self._guide_button = None
         self._comboboxes = []
         self._download_thread = None
         # Update/download affordances live inside the settings window (the
@@ -3831,6 +4117,7 @@ class AutoTyperApp(_TkBase):
                     highlightbackground=self.colors["background"],
                 )
         self._refresh_settings_window()
+        self._refresh_guide_window()
         self._style_combobox_dropdowns()
 
     def _style_combobox_dropdowns(self):
@@ -3919,6 +4206,21 @@ class AutoTyperApp(_TkBase):
             bg=c["background"], fg=c["muted"], font=("Segoe UI", 10))
         self._settings_subtitle.pack(anchor="w", pady=(2, 14))
 
+        guide_box = tk.LabelFrame(outer, text=" Guide ", bg=c["background"],
+                                  fg=c["primary"], bd=1, relief="groove",
+                                  padx=12, pady=10, font=("Segoe UI", 10, "bold"))
+        guide_box.pack(fill="x", pady=(0, 14))
+        self._guide_hint = tk.Label(
+            guide_box,
+            text="Every button and setting, explained in plain language — the guide "
+                 "opens as its own window so you can keep it open while you type.",
+            bg=c["background"], fg=c["muted"], font=("Segoe UI", 9),
+            justify="left", anchor="w", wraplength=590)
+        self._guide_hint.pack(anchor="w", pady=(0, 8))
+        self._guide_button = ttk.Button(guide_box, text="📖 Open guide…", style="Accent.TButton",
+                                        command=self._open_guide)
+        self._guide_button.pack(anchor="w")
+
         palette_box = tk.LabelFrame(outer, text=" Colour palette ", bg=c["background"],
                                     fg=c["primary"], bd=1, relief="groove",
                                     padx=12, pady=10, font=("Segoe UI", 10, "bold"))
@@ -3991,32 +4293,19 @@ class AutoTyperApp(_TkBase):
             justify="left", anchor="w", wraplength=590)
         self._log_hint.pack(anchor="w", pady=(4, 0))
 
-        preview_box = tk.LabelFrame(outer, text=" Live preview ", bg=c["background"],
-                                    fg=c["primary"], bd=1, relief="groove",
-                                    padx=12, pady=10, font=("Segoe UI", 10, "bold"))
-        preview_box.pack(fill="x", pady=(0, 10))
-        preview = tk.Frame(preview_box, bg=c["background"], height=86)
-        preview.pack(fill="x")
-        preview.pack_propagate(False)
-        self._preview_widgets = {
-            "frame": preview,
-            "title": tk.Label(preview, text="AutoTyper", font=("Segoe UI", 13, "bold")),
-            "body": tk.Label(preview, text="Settings preview — your selected palette is applied immediately.",
-                             font=("Segoe UI", 9)),
-            "button": tk.Button(preview, text="Accent button", relief="flat", padx=12, pady=4),
-        }
-        self._preview_widgets["title"].pack(side="left", padx=(4, 20), pady=22)
-        self._preview_widgets["body"].pack(side="left", fill="x", expand=True, pady=22)
-        self._preview_widgets["button"].pack(side="right", padx=4, pady=20)
+        # There used to be a "Live preview" panel down here. It only repeated
+        # what was already on screen: clicking a palette applies it to the
+        # whole app straight away, so the preview showed nothing new.
 
-        self._settings_theme_widgets = [scroller, outer, palette_box, grid, custom_box,
-                                        custom_buttons, window_box, updates_box,
-                                        preview_box, preview,
+        self._settings_theme_widgets = [scroller, outer, guide_box, palette_box, grid,
+                                        custom_box, custom_buttons, window_box,
+                                        updates_box,
                                         self._settings_title, self._settings_subtitle,
                                         self._custom_hint, self._update_hint,
-                                        self._log_hint, self._topmost_checkbutton]
-        self._settings_headings = [palette_box, custom_box, window_box, updates_box,
-                                   preview_box]
+                                        self._log_hint, self._topmost_checkbutton,
+                                        self._guide_hint]
+        self._settings_headings = [guide_box, palette_box, custom_box, window_box,
+                                   updates_box]
 
         ttk.Button(outer, text="Close", style="App.TButton", command=self._close_settings).pack(anchor="e")
 
@@ -4149,22 +4438,41 @@ class AutoTyperApp(_TkBase):
                 widget.configure(fg=c["primary"])
             except tk.TclError:
                 pass
+        if self._guide_hint is not None:
+            try:
+                self._guide_hint.configure(bg=c["background"], fg=c["muted"])
+            except tk.TclError:
+                pass
         for card, radio, swatches, name in self._settings_cards:
             card.configure(bg=c["background"], highlightbackground=c["accent"] if name == self.palette_name else c["surface"])
             radio.configure(bg=c["background"], fg=c["foreground"],
                             activebackground=c["background"], activeforeground=c["foreground"],
                             selectcolor=c["surface"])
             swatches.configure(bg=c["background"])
-        for key, widget in self._preview_widgets.items():
-            if key == "frame":
-                widget.configure(bg=c["background"])
-            elif key == "title":
-                widget.configure(bg=c["background"], fg=c["primary"])
-            elif key == "body":
-                widget.configure(bg=c["background"], fg=c["foreground"])
-            elif key == "button":
-                widget.configure(bg=c["accent"], fg=c["accent_foreground"],
-                                 activebackground=c["primary"], activeforeground="#FFFFFF")
+
+    def _open_guide(self):
+        """Show the standalone guide window (or raise it if it is already open)."""
+        if self._guide_window is not None:
+            try:
+                if self._guide_window.winfo_exists():
+                    self._guide_window.deiconify()
+                    self._guide_window.lift()
+                    return
+            except tk.TclError:
+                pass
+        self._guide_window = GuideWindow(self, self.colors,
+                                         topmost=bool(self.topmost_var.get()))
+
+    def _refresh_guide_window(self):
+        """Repaint the open guide window after the palette changed."""
+        window = getattr(self, "_guide_window", None)
+        if window is None:
+            return
+        try:
+            if window.winfo_exists():
+                window.apply_colours(self.colors)
+        except tk.TclError:
+            self._guide_window = None
 
     def _refresh_update_controls(self):
         """Label the settings download button with the version it will fetch.
@@ -4241,7 +4549,8 @@ class AutoTyperApp(_TkBase):
         self._update_hint = None
         self._log_button = None
         self._log_hint = None
-        self._preview_widgets = {}
+        self._guide_hint = None
+        self._guide_button = None
 
     # ------------------------------------------------------------------
     # Main window
