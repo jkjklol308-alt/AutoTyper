@@ -17,8 +17,10 @@ The updater has four hard behavioural contracts, all covered here:
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
 import urllib.error
@@ -123,8 +125,8 @@ class IsNewerVersionTests(unittest.TestCase):
 
 
 class AppVersionTests(unittest.TestCase):
-    def test_shipped_version_is_1_1_2(self):
-        self.assertEqual(at.APP_VERSION, "1.1.2")
+    def test_shipped_version_is_1_1_4(self):
+        self.assertEqual(at.APP_VERSION, "1.1.4")
 
     def test_points_at_this_repository(self):
         self.assertEqual(at.GITHUB_REPO, "jkjklol308-alt/AutoTyper")
@@ -462,6 +464,59 @@ class RestartEnvironmentTests(unittest.TestCase):
     def test_scrub_is_happy_when_there_is_nothing_to_remove(self):
         self.assertEqual(at.scrub_pyinstaller_runtime_environment({}), [])
 
+    def test_the_startup_environment_is_captured_before_the_scrub(self):
+        previous = at.STARTUP_RUNTIME_ENV
+        try:
+            dirty = {"PATH": "/usr/bin", "_PYI_APPLICATION_HOME_DIR": "/tmp/_MEI1"}
+            at.capture_startup_runtime_environment(dirty)
+            self.assertEqual(at.startup_runtime_env(), {"_PYI_APPLICATION_HOME_DIR": "/tmp/_MEI1"})
+            at.scrub_pyinstaller_runtime_environment(dirty)
+            # The scrub of the live process cannot rewrite what the log will say.
+            self.assertEqual(at.startup_runtime_env(), {"_PYI_APPLICATION_HOME_DIR": "/tmp/_MEI1"})
+        finally:
+            at.STARTUP_RUNTIME_ENV = previous
+
+    def test_an_uncaptured_environment_is_read_live(self):
+        previous = at.STARTUP_RUNTIME_ENV
+        try:
+            at.STARTUP_RUNTIME_ENV = None
+            with mock.patch.dict(os.environ, {"_MEIPASS2": "x", "PATH": "/usr/bin"}, clear=False):
+                self.assertEqual(at.startup_runtime_env(), {"_MEIPASS2": "x"})
+        finally:
+            at.STARTUP_RUNTIME_ENV = previous
+
+    def test_a_build_that_unpacked_its_own_files_is_reported_as_fresh(self):
+        previous = at.STARTUP_RUNTIME_ENV
+        try:
+            at.STARTUP_RUNTIME_ENV = {}
+            with mock.patch.object(at.sys, "_MEIPASS", r"C:\Temp\_MEI123", create=True):
+                text = at.describe_onefile_home()
+            self.assertIn("onefile-home=unset", text)
+            self.assertIn("fresh", text)
+            self.assertIn(r"C:\Temp\_MEI123", text)
+        finally:
+            at.STARTUP_RUNTIME_ENV = previous
+
+    def test_a_build_using_its_own_extraction_folder_says_so(self):
+        previous = at.STARTUP_RUNTIME_ENV
+        try:
+            at.STARTUP_RUNTIME_ENV = {"_PYI_APPLICATION_HOME_DIR": "/tmp/_MEI7"}
+            with mock.patch.object(at.sys, "_MEIPASS", "/tmp/_MEI7", create=True):
+                self.assertIn("(own extraction dir)", at.describe_onefile_home())
+        finally:
+            at.STARTUP_RUNTIME_ENV = previous
+
+    def test_a_build_pointed_at_another_processs_folder_is_flagged(self):
+        previous = at.STARTUP_RUNTIME_ENV
+        try:
+            at.STARTUP_RUNTIME_ENV = {"_PYI_APPLICATION_HOME_DIR": "/tmp/_MEIdead"}
+            with mock.patch.object(at.sys, "_MEIPASS", "/tmp/_MEInew", create=True):
+                text = at.describe_onefile_home()
+            self.assertIn("NOT this build's extraction dir", text)
+            self.assertIn("/tmp/_MEIdead", text)
+        finally:
+            at.STARTUP_RUNTIME_ENV = previous
+
     def test_scrub_on_the_real_environment_leaves_it_usable(self):
         with mock.patch.dict(os.environ, {"_PYI_PARENT_PROCESS_LEVEL": "0"}, clear=False):
             at.scrub_pyinstaller_runtime_environment()
@@ -640,6 +695,22 @@ class InstallUpdateTests(unittest.TestCase):
         self.assertIn(str(self.new_exe), script.read_text(encoding="utf-8"))
         launch.assert_called_once()
 
+    def test_the_script_is_written_with_clean_crlf_line_endings(self):
+        # Text mode on Windows would turn every "\r\n" into "\r\r\n" and
+        # hand cmd.exe a stray carriage return on every single line.
+        for windows in (True, False):
+            with mock.patch.object(at, "launch_swap_script"):
+                script = at.install_update_and_restart(self.new_exe, self.target,
+                                                       windows=windows,
+                                                       temp_dir=self.dir / f"stage-{windows}",
+                                                       pid=1234)
+            raw = script.read_bytes()
+            self.assertNotIn(b"\r\r\n", raw)
+            if windows:
+                self.assertIn(b"@echo off\r\n", raw)
+            else:
+                self.assertTrue(raw.startswith(b"#!/bin/sh\n"))
+
     def test_posix_script_is_executable(self):
         with mock.patch.object(at, "launch_swap_script"):     # never spawn a real swapper here
             script = at.install_update_and_restart(self.new_exe, self.target, windows=False,
@@ -664,11 +735,51 @@ class InstallUpdateTests(unittest.TestCase):
         self.assertEqual(args[0][0], "cmd")
         self.assertIn("creationflags", kwargs)   # detached: the swap outlives this process
 
+    def test_launch_gives_the_script_its_own_console_on_windows(self):
+        # Spawned fully detached, cmd.exe froze mid-loop on a real runner (the
+        # process alive, the swap log stuck after the first wait) while the
+        # identical script run in the foreground - which has a console -
+        # finished both of its outcomes.
+        with mock.patch.object(at.subprocess, "CREATE_NEW_CONSOLE", 0x10, create=True), \
+                mock.patch.object(at.subprocess, "Popen") as popen:
+            at.launch_swap_script(self.dir / "s.bat", windows=True)
+        _, kwargs = popen.call_args
+        self.assertEqual(kwargs["creationflags"] & 0x10, 0x10)
+
+    def test_launch_never_shows_the_console_window(self):
+        class _StartupInfo:
+            def __init__(self):
+                self.dwFlags = 0
+                self.wShowWindow = None
+
+        with mock.patch.object(at.subprocess, "STARTUPINFO", _StartupInfo, create=True), \
+                mock.patch.object(at.subprocess, "STARTF_USESHOWWINDOW", 0x1, create=True), \
+                mock.patch.object(at.subprocess, "SW_HIDE", 0, create=True), \
+                mock.patch.object(at.subprocess, "Popen") as popen:
+            at.launch_swap_script(self.dir / "s.bat", windows=True)
+        _, kwargs = popen.call_args
+        info = kwargs["startupinfo"]
+        self.assertEqual(info.dwFlags & 0x1, 0x1)
+        self.assertEqual(info.wShowWindow, 0)
+
     def test_launch_uses_a_new_session_elsewhere(self):
         with mock.patch.object(at.subprocess, "Popen") as popen:
             at.launch_swap_script(self.dir / "s.sh", windows=False)
         _, kwargs = popen.call_args
         self.assertTrue(kwargs.get("start_new_session"))
+
+    def test_launch_never_hands_our_files_to_the_swap_script(self):
+        # Not a pipe and not the swap log itself: the script writes that log,
+        # and any handle held here makes its own write fail ("The process
+        # cannot access the file because it is being used by another
+        # process."). A detached cmd also needs *valid* handles rather than
+        # none, so all three point at the null device.
+        for windows, name in ((True, "s.bat"), (False, "s.sh")):
+            with mock.patch.object(at.subprocess, "Popen") as popen:
+                at.launch_swap_script(self.dir / name, windows=windows)
+            _, kwargs = popen.call_args
+            for handle in ("stdin", "stdout", "stderr"):
+                self.assertIs(kwargs.get(handle), at.subprocess.DEVNULL, handle)
 
     def test_launch_hands_the_script_a_scrubbed_environment(self):
         """The swap script must not describe *our* unpacked files: it starts
@@ -904,14 +1015,14 @@ class GuiDownloadResultTests(unittest.TestCase):
 
     def test_self_update_offers_to_install(self):
         installed = []
-        self.app._install_downloaded_update = installed.append
+        self.app._install_downloaded_update = lambda path, version=None: installed.append((path, version))
         self.messagebox.askyesno = lambda *args, **kwargs: True
         self.result("self_update", ("C:/Temp/AutoTyper.exe", "1.3.0"))
-        self.assertEqual(installed, ["C:/Temp/AutoTyper.exe"])
+        self.assertEqual(installed, [("C:/Temp/AutoTyper.exe", "1.3.0")])
 
     def test_declining_the_install_keeps_the_current_build(self):
         installed = []
-        self.app._install_downloaded_update = installed.append
+        self.app._install_downloaded_update = lambda path, version=None: installed.append((path, version))
         self.messagebox.askyesno = lambda *args, **kwargs: False
         self.result("self_update", ("C:/Temp/AutoTyper.exe", "1.3.0"))
         self.assertEqual(installed, [])
@@ -935,8 +1046,9 @@ class GuiDownloadResultTests(unittest.TestCase):
         with mock.patch.object(self.mod, "install_update_and_restart",
                                return_value=Path("/tmp/AutoTyper-update.bat")) as installer, \
              mock.patch.object(self.mod, "running_executable", return_value=Path("/opt/AutoTyper.exe")):
-            install("C:/Temp/AutoTyper.exe")
-        installer.assert_called_once_with("C:/Temp/AutoTyper.exe", Path("/opt/AutoTyper.exe"))
+            install("C:/Temp/AutoTyper.exe", "1.3.0")
+        installer.assert_called_once_with("C:/Temp/AutoTyper.exe",
+                                          Path("/opt/AutoTyper.exe"), version="1.3.0")
         self.assertEqual(self.app.quit_calls, 1)
         self.assertEqual(self.messagebox.calls[-1][0], "showinfo")
 
@@ -1039,6 +1151,352 @@ class DefaultDownloadDirTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.object(at.Path, "home", return_value=Path(tmp)):
                 self.assertEqual(at.default_download_dir(), Path(tmp))
+
+
+# ---------------------------------------------------------------------------
+# Completeness of the download (v1.1.3)
+# ---------------------------------------------------------------------------
+class DownloadSizeTests(unittest.TestCase):
+    """A transfer that stops early must never be installed.
+
+    A truncated file used to pass every check that existed — it is non-empty
+    and it starts with "MZ" — so it was swapped in, could not start, and the
+    user was left with an update that "keeps failing". The release advertises
+    the size of its asset; that number is now checked.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.destination = Path(self.tmp.name) / "AutoTyper.exe"
+
+    def _download(self, payload, **kwargs):
+        with mock.patch.object(at.urllib.request, "urlopen",
+                               return_value=FakeResponse(payload)):
+            return at.download_file("https://example.invalid/x", self.destination, **kwargs)
+
+    def test_a_short_download_is_rejected(self):
+        full = make_exe(4096)
+        with self.assertRaises(at.DownloadError) as caught:
+            self._download(full[:1000], expected_size=4096)
+        self.assertIn("incomplete", str(caught.exception))
+        self.assertIn("1000", str(caught.exception))
+
+    def test_a_complete_download_is_accepted(self):
+        destination = self._download(make_exe(4096), expected_size=4096)
+        self.assertEqual(destination.stat().st_size, 4096)
+
+    def test_the_advertised_size_of_the_release_is_what_gets_used(self):
+        """`asset.size` from the GitHub API, not a guess."""
+        asset = at.UpdateAsset(name="AutoTyper.exe", url="https://example.invalid/x",
+                               size=4096)
+        self.assertEqual(asset.size, 4096)
+        self.assertEqual(getattr(asset, "size", 0), 4096)
+
+    def test_a_truncated_file_leaves_nothing_behind(self):
+        with self.assertRaises(at.DownloadError):
+            self._download(make_exe(4096)[:10], expected_size=4096)
+        self.assertFalse(self.destination.exists())
+        self.assertFalse(self.destination.with_name(self.destination.name + ".part").exists())
+
+    def test_a_lying_content_length_is_caught_too(self):
+        response = FakeResponse(make_exe(2048), headers={"Content-Length": "4096"})
+        with mock.patch.object(at.urllib.request, "urlopen", return_value=response):
+            with self.assertRaises(at.DownloadError):
+                at.download_file("https://example.invalid/x", self.destination)
+
+    def test_without_any_size_information_the_old_checks_still_apply(self):
+        # No Content-Length and no advertised size: accept what arrived as
+        # long as it looks like a Windows executable.
+        self.assertEqual(self._download(make_exe(64)).stat().st_size, 64)
+        with self.assertRaises(at.DownloadError):
+            self._download(b"<html>not an exe</html>")
+
+
+class InstallSizeGuardTests(unittest.TestCase):
+    def test_a_staged_file_of_the_wrong_size_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            new_exe = root / "downloaded.exe"
+            new_exe.write_bytes(make_exe(1024))
+            target = root / "AutoTyper.exe"
+            target.write_bytes(make_exe(16))
+            with self.assertRaises(at.DownloadError) as caught:
+                at.install_update_and_restart(new_exe, target, windows=True,
+                                              temp_dir=root / "stage",
+                                              expected_size=4096)
+            self.assertIn("wrong size", str(caught.exception))
+            self.assertFalse((root / "stage" / "AutoTyper-update.bat").exists())
+
+
+# ---------------------------------------------------------------------------
+# Verifying the restart, and rolling back when it fails (v1.1.3)
+# ---------------------------------------------------------------------------
+class SwapVerificationScriptTests(unittest.TestCase):
+    def setUp(self):
+        self.files = at.UpdateHandoff(marker=Path(r"C:\Data\startup-ok"),
+                                      result=Path(r"C:\Data\update-result.txt"),
+                                      log=Path(r"C:\Data\AutoTyper-update.log"))
+        self.script = at.build_windows_swap_script(
+            r"C:\Temp\AutoTyper-update\AutoTyper.exe", r"C:\Apps\AutoTyper.exe",
+            version="1.1.3", handoff=self.files)
+
+    def test_the_script_waits_for_the_new_build_to_signal_its_window(self):
+        self.assertIn('set "MARKER=C:\\Data\\startup-ok"', self.script)
+        self.assertIn('del "%MARKER%" >nul 2>&1', self.script)     # stale markers cannot count
+        self.assertIn(":watch", self.script)
+        self.assertIn('if not exist "%MARKER%" goto watching', self.script)
+
+    def test_only_the_version_we_started_counts_as_started(self):
+        self.assertIn('findstr /C:"v%VERSION%" "%MARKER%"', self.script)
+        self.assertIn('set "VERSION=1.1.3"', self.script)
+
+    def test_a_build_that_died_is_not_waited_on_for_a_minute(self):
+        self.assertIn('tasklist /NH /FI "IMAGENAME eq %IMAGE%"', self.script)
+        self.assertIn("if errorlevel 1 goto missing", self.script)
+        self.assertIn("if %GONE% GEQ 10 goto notstarted", self.script)
+
+    def test_it_puts_the_previous_build_back_and_starts_it(self):
+        rollback = self.script.split(":notstarted", 1)[1]
+        self.assertIn('copy /Y "%TARGET%.old" "%TARGET%" >nul 2>&1', rollback)
+        self.assertIn('start "" "%TARGET%"', rollback)
+
+    def test_it_records_its_verdict_for_the_next_window(self):
+        self.assertIn('>>"%RESULT%" echo ok v%VERSION%', self.script)
+        self.assertIn("rolled-back v%VERSION%", self.script)
+        self.assertIn('>>"%LOG%" echo', self.script)
+
+    def test_a_failed_copy_is_recorded_as_a_rollback_too(self):
+        give_up = self.script.split(":giveup", 1)[1]
+        self.assertIn("rolled-back v%VERSION%", give_up)
+        self.assertIn('start "" "%TARGET%"', give_up)
+
+    def test_the_backup_is_deleted_once_it_is_not_needed(self):
+        # The .old copy is a working file, not a keepsake: a successful start
+        # deletes it, and so does a swap that never happened.
+        started = self.script.split(":started", 1)[1].split(":notstarted", 1)[0]
+        self.assertIn('del "%TARGET%.old" >nul 2>&1', started)
+        give_up = self.script.split(":giveup", 1)[1]
+        self.assertIn('del "%TARGET%.old" >nul 2>&1', give_up)
+
+    def test_a_rollback_keeps_the_backup_until_the_restore_worked(self):
+        # If the copy back fails the .old file is all that is left of the
+        # previous build, so it may only go once the restore has succeeded.
+        rollback = self.script.split(":notstarted", 1)[1].split(":giveup", 1)[0]
+        self.assertIn('copy /Y "%TARGET%.old" "%TARGET%" >nul 2>&1', rollback)
+        self.assertIn('if not errorlevel 1 del "%TARGET%.old" >nul 2>&1', rollback)
+        self.assertLess(rollback.index('copy /Y "%TARGET%.old"'),
+                        rollback.index('if not errorlevel 1 del "%TARGET%.old"'))
+
+    def test_the_onefile_variables_are_deleted_not_just_blanked(self):
+        # `set "NAME="` is cmd.exe's documented form for deleting a variable,
+        # and the CI job runs these exact lines on a real cmd.exe to prove the
+        # new build cannot inherit this process's unpacked-file paths.
+        for name in at.PYINSTALLER_RUNTIME_ENV_VARS:
+            self.assertIn(f'set "{name}="\r\n', self.script)
+
+    def test_placeholders_exist_for_the_builds_that_never_signal(self):
+        script = at.build_windows_swap_script("n.exe", "t.exe")
+        self.assertIn(":watch", script)
+        self.assertIn(":notstarted", script)
+
+
+class PosixSwapExecutionTests(unittest.TestCase):
+    """Run the generated shell script for real (skipped on Windows)."""
+
+    def setUp(self):
+        if os.name != "posix":       # pragma: no cover - Windows CI
+            self.skipTest("the swap script is a /bin/sh script")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.app_dir = self.root / "app"
+        self.app_dir.mkdir()
+        self.target = self.app_dir / "AutoTyper"
+        self.files = at.update_handoff(self.root / "data")
+        # Give the script a PID that cannot be running: a child that has
+        # already been reaped.
+        finished = subprocess.Popen(["/bin/true"])
+        finished.wait()
+        self.free_pid = finished.pid
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _build_starting_build(self, text):
+        """A stand-in build that writes the start-up marker, like the app."""
+        path = self.root / "staged" / "AutoTyper"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            text.replace("@MARKER@", str(self.files.marker)), encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def _install_build(self, text):
+        """The build already on disk, at the path the swap script replaces."""
+        self.target.write_text(text.replace("@MARKER@", str(self.files.marker)),
+                               encoding="utf-8")
+        self.target.chmod(0o755)
+
+    def _run_swap(self, new_exe, watch_seconds=4):
+        script = self.root / "swap.sh"
+        script.write_text(at.build_posix_swap_script(
+            new_exe, self.target, self.free_pid, version="9.9.9",
+            handoff=self.files, watch_seconds=watch_seconds), encoding="utf-8")
+        script.chmod(0o755)
+        return subprocess.run(["/bin/sh", str(script)],
+                              capture_output=True, text=True, timeout=90)
+
+    def test_a_new_build_that_signals_startup_is_kept(self):
+        old_text = "#!/bin/sh\necho old\n"
+        self._install_build(old_text)
+        new = self._build_starting_build(
+            "#!/bin/sh\nprintf 'v9.9.9 pid=1\\n' > \"@MARKER@\"\n")
+        new_text = new.read_text(encoding="utf-8")
+        result = self._run_swap(new)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.files.result.read_text(encoding="utf-8").strip(), "ok v9.9.9")
+        self.assertTrue(self.files.marker.exists())
+        # The target really is the new build...
+        self.assertEqual(self.target.read_text(encoding="utf-8"), new_text)
+        # ...and the copy the swap needed on the way is gone again.
+        self.assertFalse(Path(str(self.target) + ".old").exists())
+        self.assertIn("started", self.files.log.read_text(encoding="utf-8"))
+
+    def test_a_new_build_that_never_signals_is_rolled_back_and_restarted(self):
+        old_text = (f"#!/bin/sh\nprintf 'v1.1.2 pid=1\\n' > '{self.files.marker}'\n"
+                    f"printf 'restarted\\n' >> '{self.root / 'restarted.txt'}'\n")
+        self._install_build(old_text)
+        broken = self._build_starting_build("#!/bin/sh\nexit 3\n")
+        result = self._run_swap(broken)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        verdict = self.files.result.read_text(encoding="utf-8")
+        self.assertTrue(verdict.startswith("rolled-back v9.9.9"), verdict)
+        # The previous build is back in place...
+        self.assertEqual(self.target.read_text(encoding="utf-8"), old_text)
+        # ...and it was started again, so the user still has an app.
+        deadline = time.time() + 10
+        restarted = self.root / "restarted.txt"
+        while not restarted.exists() and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertTrue(restarted.exists(), "the restored build was never started")
+        self.assertIn("never signalled", self.files.log.read_text(encoding="utf-8"))
+
+
+class DiagnosticsLogTests(unittest.TestCase):
+    """The record a failed update leaves behind, and how it is reported."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_events_are_appended_with_the_version_and_a_timestamp(self):
+        path = self.base / "AutoTyper.log"
+        at.log_event("hello", path=path)
+        at.log_event("again", path=path)
+        lines = path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertIn(f"v{at.APP_VERSION} hello", lines[0])
+        self.assertTrue(lines[0].startswith("["))
+        self.assertIn("again", lines[1])
+
+    def test_logging_never_raises(self):
+        # A read-only home directory must not stop the typer.
+        with mock.patch.object(at.Path, "mkdir", side_effect=OSError("read-only")):
+            at.log_event("this must not raise", path=self.base / "nope" / "x.log")
+
+    def test_startup_environment_is_recorded(self):
+        # In this order, the way `main` does it: the capture must happen before
+        # the scrub, or the log could only report the clean environment the app
+        # itself created and never what the bootloader handed it.
+        previous = at.STARTUP_RUNTIME_ENV
+        try:
+            with mock.patch.object(at, "log_file_path",
+                                   return_value=self.base / "AutoTyper.log"), \
+                    mock.patch.dict(os.environ, {"_PYI_ARCHIVE_FILE": "stale.exe"}, clear=False):
+                at.capture_startup_runtime_environment()
+                at.scrub_pyinstaller_runtime_environment()
+                at.log_startup_environment()
+        finally:
+            at.STARTUP_RUNTIME_ENV = previous
+        text = (self.base / "AutoTyper.log").read_text(encoding="utf-8")
+        self.assertIn("onefile-env=['_PYI_ARCHIVE_FILE']", text)
+        self.assertIn("frozen=", text)
+
+    def test_the_startup_marker_names_the_version(self):
+        with mock.patch.object(at, "startup_marker_path",
+                               return_value=self.base / "startup-ok"), \
+                mock.patch.object(at, "log_file_path", return_value=self.base / "AutoTyper.log"):
+            marker = at.mark_startup_complete()
+        self.assertEqual(marker.read_text(encoding="utf-8").split()[0], f"v{at.APP_VERSION}")
+
+    def test_a_rollback_is_reported_to_the_user_and_only_once(self):
+        mod, messagebox = _load_module_with_tk_stub()
+        messagebox.calls.clear()
+        result_file = self.base / "update-result.txt"
+        result_file.write_text("rolled-back v9.9.9 the new build never started\n",
+                               encoding="utf-8")
+        with mock.patch.object(mod, "update_result_path", return_value=result_file), \
+                mock.patch.object(mod, "log_file_path", return_value=self.base / "AutoTyper.log"), \
+                mock.patch.object(mod, "swap_log_path", return_value=self.base / "u.log"):
+            reported = mod.report_previous_update(None)
+            again = mod.report_previous_update(None)
+        self.assertIsNotNone(reported)
+        self.assertIsNone(again)                      # the file is consumed
+        self.assertEqual(messagebox.calls[-1][0], "showwarning")
+        self.assertIn("previous version", messagebox.calls[-1][2])
+
+    def test_a_successful_update_is_not_reported(self):
+        mod, messagebox = _load_module_with_tk_stub()
+        messagebox.calls.clear()
+        result_file = self.base / "update-result.txt"
+        result_file.write_text("ok v9.9.9\n", encoding="utf-8")
+        with mock.patch.object(mod, "update_result_path", return_value=result_file), \
+                mock.patch.object(mod, "log_file_path", return_value=self.base / "AutoTyper.log"):
+            reported = mod.report_previous_update(None)
+        self.assertEqual(reported, "ok v9.9.9")
+        self.assertEqual(messagebox.calls, [])
+        self.assertFalse(result_file.exists())
+
+
+class PreviousBuildBackupTests(unittest.TestCase):
+    """The .old copy exists for one swap, not as a second copy of the app."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.exe = self.dir / "AutoTyper.exe"
+        self.exe.write_text("current", encoding="utf-8")
+        self.backup = Path(str(self.exe) + ".old")
+        self.backup.write_text("previous", encoding="utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_deletes_the_leftover_backup_beside_the_running_build(self):
+        with mock.patch.object(at, "running_executable", return_value=self.exe), \
+                mock.patch.object(at, "log_event") as logged:
+            removed = at.remove_previous_build_backup()
+        self.assertEqual(removed, self.backup)
+        self.assertFalse(self.backup.exists())
+        self.assertTrue(self.exe.exists())      # only the spare copy goes
+        self.assertTrue(any(".old" in str(call) for call in logged.call_args_list))
+
+    def test_is_a_no_op_when_there_is_no_backup(self):
+        self.backup.unlink()
+        with mock.patch.object(at, "running_executable", return_value=self.exe):
+            self.assertIsNone(at.remove_previous_build_backup())
+
+    def test_never_raises_when_the_backup_cannot_be_removed(self):
+        with mock.patch.object(at, "running_executable", return_value=self.exe), \
+                mock.patch.object(at.Path, "unlink", side_effect=OSError("locked")):
+            self.assertIsNone(at.remove_previous_build_backup())
+
+    def test_does_nothing_for_a_source_run(self):
+        with mock.patch.object(at, "running_executable", return_value=None):
+            self.assertIsNone(at.remove_previous_build_backup())
 
 
 class SettingsMigrationTests(unittest.TestCase):

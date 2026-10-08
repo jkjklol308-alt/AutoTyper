@@ -27,13 +27,20 @@ A next-generation human typing simulator implementing:
      upgrade.
   9. .exe Delivery: updates download the published AutoTyper.exe rather than a
      Python script. A packaged build swaps itself in and restarts
-     automatically (keeping a .old backup); a build running from source saves
+     automatically (keeping a .old backup only as long as the swap needs it);
+     a build running from source saves
      the executable next to the user's other downloads. Since v1.1.2 the
      restart is started with a clean environment, exactly like a manual
      double-click: PyInstaller's onefile variables are cleared first, so the
      next build unpacks its own files instead of looking for the previous
      process's temporary folder (which made the app die with "Error loading
-     Python DLL" straight after an update).
+     Python DLL" straight after an update). Since v1.1.3 the swap is also
+     *verified*: a download must match the size the release advertises, the
+     restarted build has to signal that its window came up (see
+     `mark_startup_complete`), and if it does not, the previous build is
+     restored and started again, with the whole exchange written to
+     `AutoTyper.log` and `AutoTyper-update.log` so a failure can never be
+     silent or unexplained.
  10. Custom UI Colours (v1.1.0, reworked in v1.1.1): a Microsoft-Paint style
      gradient colour picker — a full colour field (rainbow of hues across,
      saturation fading down, drawn at the current shade) plus a white-to-black
@@ -78,7 +85,7 @@ try:
 except ImportError:
     tk = messagebox = ttk = None
 
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.4"
 APP_NAME = "AutoTyper"
 GITHUB_REPO = "jkjklol308-alt/AutoTyper"
 EXE_ASSET_NAME = "AutoTyper.exe"
@@ -1571,7 +1578,8 @@ class TracePlayer:
 #     new build, saving it next to their other downloads, or doing nothing.
 #   * Installing is safe: the replacement happens after the running process
 #     exits (Windows keeps the .exe locked while it runs), a .old backup of the
-#     previous executable is left behind, and a download that is not a real
+#     previous executable guards the swap and is deleted once the new build has
+#     proved it comes up, and a download that is not a real
 #     Windows executable is rejected before anything is touched.
 #   * Restarting is clean: the relaunch is started without PyInstaller's
 #     onefile bookkeeping in the environment (see
@@ -1891,6 +1899,63 @@ def restart_environment(env: Optional[dict] = None) -> Dict[str, str]:
     return clean
 
 
+#: The PyInstaller onefile variables this process was *started* with, captured
+#: before `scrub_pyinstaller_runtime_environment()` deletes them. They are the
+#: only evidence of which extraction folder this build was handed: once they
+#: are gone, "nothing was inherited" and "we deleted it ourselves" look the
+#: same in the environment. `None` means nothing was captured.
+STARTUP_RUNTIME_ENV: Optional[Dict[str, str]] = None
+
+
+def capture_startup_runtime_environment(env=None) -> Dict[str, str]:
+    """Remember the PyInstaller variables in ``env`` (default: ours).
+
+    Must run before the scrub. `log_startup_environment()` reports from this
+    record, so the log says what the *bootloader* handed us rather than what is
+    left after we cleaned up.
+    """
+    global STARTUP_RUNTIME_ENV
+    target = os.environ if env is None else env
+    STARTUP_RUNTIME_ENV = {name: value for name, value in target.items()
+                           if name.upper() in _PYINSTALLER_RUNTIME_ENV_VARS_UPPER}
+    return STARTUP_RUNTIME_ENV
+
+
+def startup_runtime_env() -> Dict[str, str]:
+    """What this process started with, or the live environment if uncaptured."""
+    if STARTUP_RUNTIME_ENV is not None:
+        return dict(STARTUP_RUNTIME_ENV)
+    return {name: value for name, value in os.environ.items()
+            if name.upper() in _PYINSTALLER_RUNTIME_ENV_VARS_UPPER}
+
+
+def describe_onefile_home() -> str:
+    """Where this build's unpacked files came from — the "Error loading Python
+    DLL" question — as one clause for the log and the update probes.
+
+    Three states, and only the last one is broken:
+
+    * **no `_PYI_APPLICATION_HOME_DIR` at start**: this process unpacked its own
+      files; `_MEIPASS` (a property of this process, not an environment
+      variable) is therefore this build's own folder. This is the state of a
+      build started from a scrubbed environment — the normal post-update case.
+    * **a folder equal to `_MEIPASS`**: a onefile child handed its parent's
+      extraction directory, which *is* this build's folder.
+    * **anything else**: somebody else's folder. That is the reported failure —
+      the folder was deleted when the build that owned it exited, so the Python
+      DLL is gone by the time this process looks for it.
+    """
+    home = startup_runtime_env().get("_PYI_APPLICATION_HOME_DIR", "")
+    meipass = getattr(sys, "_MEIPASS", None) or ""
+    if not home:
+        if meipass:
+            return f"onefile-home=unset (fresh: this build unpacked its own files into {meipass})"
+        return "onefile-home=unset (nothing inherited)"
+    if meipass and os.path.normcase(home) == os.path.normcase(meipass):
+        return f"onefile-home={home} (own extraction dir)"
+    return f"onefile-home={home} (NOT this build's extraction dir {meipass or 'unknown'})"
+
+
 def scrub_pyinstaller_runtime_environment(env=None) -> List[str]:
     """Delete this process's PyInstaller onefile state from ``env``.
 
@@ -1909,6 +1974,215 @@ def scrub_pyinstaller_runtime_environment(env=None) -> List[str]:
             continue
         removed.append(name)
     return removed
+
+
+# -----------------------------------------------------------------------------
+# The log, and the files the app and the swap script pass to each other
+# -----------------------------------------------------------------------------
+#
+# A failed update used to leave nothing behind: the window is gone, the
+# bootloader's message box is dismissed, and there is no record of what the old
+# build did before it quit. That is exactly how an update can appear to "keep
+# failing with the same error" and stay undiagnosed. Three small files change
+# that, all of them in one folder:
+#
+#   AutoTyper.log          what this build is and what it did (version,
+#                          executable, onefile environment, update events,
+#                          unhandled exceptions)
+#   startup-ok             touched by `mark_startup_complete()` once the window
+#                          really is up; the swap script waits for it
+#   update-result.txt      the swap script's verdict, "ok <version>" or
+#                          "rolled-back <version> <detail>", which the next
+#                          window reads, reports and clears
+#
+# The swap script keeps its own log (`AutoTyper-update.log`) next to them, and
+# both logs survive the restart, so the story of an update is complete even if
+# the new build never gets as far as Python.
+
+APP_DATA_DIR_NAME = APP_NAME
+
+
+def app_data_dir() -> Path:
+    """The folder that holds AutoTyper's log and update hand-off files."""
+    base = os.environ.get("LOCALAPPDATA") if os.name == "nt" else None
+    if base:
+        return Path(base) / APP_DATA_DIR_NAME
+    return Path.home() / f".{APP_DATA_DIR_NAME.lower()}"
+
+
+def log_file_path() -> Path:
+    return app_data_dir() / f"{APP_NAME}.log"
+
+
+def swap_log_path() -> Path:
+    return app_data_dir() / f"{APP_NAME}-update.log"
+
+
+def startup_marker_path() -> Path:
+    return app_data_dir() / "startup-ok"
+
+
+def update_result_path() -> Path:
+    return app_data_dir() / "update-result.txt"
+
+
+def describe_size(path) -> str:
+    """``"1234567 bytes"`` for the log, or a placeholder if it cannot be read.
+
+    Logging must never be the reason an update fails, so an unreadable file is
+    described as unknown rather than raised.
+    """
+    try:
+        return f"{Path(path).stat().st_size} bytes"
+    except OSError:
+        return "size unknown"
+
+
+def log_event(message: str, *, path: Optional[Path] = None) -> None:
+    """Append one timestamped line to the log, and never raise.
+
+    Logging is a diagnostic aid, so a read-only home directory or a full disk
+    must not stop the typer (the same rule the settings file follows).
+    """
+    try:
+        target = Path(path) if path is not None else log_file_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write(f"[{stamp}] v{APP_VERSION} {message}\n")
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def log_startup_environment() -> None:
+    """Record what this build is and what the bootloader handed it.
+
+    Reports the variables captured *before* the scrub (see
+    `capture_startup_runtime_environment`), so `onefile-env` lists what this
+    process inherited rather than what is left after we cleaned up — the
+    distinction the "Error loading Python DLL" failure turns on.
+    """
+    meipass = getattr(sys, "_MEIPASS", None) or ""
+    inherited = sorted(startup_runtime_env())
+    where = describe_onefile_home() if is_frozen() else "onefile-home=n/a (source run)"
+    log_event(
+        "start: "
+        f"frozen={is_frozen()} sys.executable={getattr(sys, 'executable', '')!r} "
+        f"_MEIPASS={meipass!r} {where} onefile-env={inherited if inherited else 'clean'} "
+        f"python={sys.version.split()[0]} platform={sys.platform}"
+    )
+
+
+def mark_startup_complete() -> Path:
+    """Signal that this window is up; the update swap script waits for it.
+
+    The marker names the version, so a swap script that knows which build it
+    started can also check that the *right* build answered.
+    """
+    marker = startup_marker_path()
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(f"v{APP_VERSION} pid={os.getpid()}\n", encoding="utf-8")
+    except (OSError, ValueError, TypeError):
+        pass
+    log_event("start: window ready")
+    return marker
+
+
+def remove_previous_build_backup() -> Optional[Path]:
+    """Delete the spare copy a stuck or older update may have left behind.
+
+    The swap script removes its own backup on every path out of it, so this is
+    housekeeping for the leftovers: an update whose script was killed outright
+    (a reboot, a closed laptop) and copies left by older versions, which kept
+    the backup for good.
+
+    Only called once this window is up, which is exactly the point at which the
+    script stops needing the backup: it exists to undo a build that never
+    reported its window, and that has now been reported.
+    """
+    exe = running_executable()
+    if exe is None:
+        return None
+    backup = Path(str(exe) + ".old")
+    try:
+        if not backup.is_file():
+            return None
+        backup.unlink()
+    except OSError:
+        return None
+    log_event(f"start: removed a leftover backup of the previous build ({backup.name})")
+    return backup
+
+
+def clear_startup_marker() -> None:
+    try:
+        startup_marker_path().unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def read_update_result() -> Optional[str]:
+    """The swap script's verdict from the last update, if it left one."""
+    try:
+        return update_result_path().read_text(encoding="utf-8").strip() or None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def clear_update_result() -> None:
+    try:
+        update_result_path().unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def report_previous_update(parent=None) -> Optional[str]:
+    """Explain what the last update did — but only when it went wrong.
+
+    A successful update stays silent (the app never bothers the user about
+    something that worked); a rollback is spelled out, because otherwise the
+    user is left with an app that simply refuses to change version, which is
+    indistinguishable from "the update keeps failing".
+    """
+    result = read_update_result()
+    if result is None:
+        return None
+    clear_update_result()
+    log_event(f"update: previous run reported {result!r}")
+    if result.startswith("ok"):
+        return result
+    detail = result.split(" ", 2)[2] if len(result.split(" ", 2)) > 2 else result
+    if messagebox is not None and tk is not None:
+        try:
+            messagebox.showwarning(
+                "Update rolled back",
+                "The last update could not be started, so AutoTyper restored the "
+                "previous version and opened it again.\n\n"
+                f"What happened: {detail}\n\n"
+                f"Details are in:\n{log_file_path()}\n{swap_log_path()}\n\n"
+                "You can also update by hand: download AutoTyper.exe from "
+                f"{RELEASES_PAGE_URL} and replace this file with it.",
+                parent=parent,
+            )
+        except tk.TclError:
+            pass
+    return result
+
+
+def open_path(path) -> bool:
+    """Open a file (or folder) with the desktop's default application."""
+    path = Path(path)
+    try:
+        if os.name == "nt":
+            os.startfile(str(path))  # noqa: S606 - Windows shell open
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
+        return True
+    except Exception:
+        return False
 
 
 def default_download_dir() -> Path:
@@ -1948,14 +2222,21 @@ def looks_like_windows_executable(path: Path) -> bool:
 
 
 def download_file(url: str, destination: Path, *, timeout: float = DOWNLOAD_TIMEOUT,
-                  progress=None, opener=None) -> Path:
-    """Download `url` to `destination` atomically and verify it looks real.
+                  progress=None, opener=None, expected_size: Optional[int] = None) -> Path:
+    """Download `url` to `destination` atomically and verify it is complete.
 
     The payload is written to a temporary ".part" file and only moved into
-    place once the transfer finished *and* the file starts with the Windows
-    "MZ" header, so a failed or garbled download can never overwrite a good
-    executable. `progress(bytes_done, total_bytes_or_zero)` is called as the
-    transfer advances (total is 0 when the server sends no length).
+    place once the transfer finished, arrived in one piece *and* starts with
+    the Windows "MZ" header, so a failed, truncated or garbled download can
+    never overwrite a good executable. `progress(bytes_done, total_bytes_or_zero)`
+    is called as the transfer advances (total is 0 when the server sends no
+    length).
+
+    `expected_size` is the size the release advertises for this asset. A short
+    download used to pass every check that existed (it is non-empty and it
+    starts with "MZ") and would then be *installed*, leaving the user with a
+    build that cannot start — one of the ways the same error survives an
+    update. Now it is rejected before anything is touched.
     """
     destination = Path(destination)
     try:
@@ -1968,6 +2249,8 @@ def download_file(url: str, destination: Path, *, timeout: float = DOWNLOAD_TIME
     )
     open_fn = opener or urllib.request.urlopen
     written = 0
+    declared = 0
+    content_encoding = ""
     try:
         with open_fn(request, timeout=timeout) as response:
             status = getattr(response, "status", 200)
@@ -1980,6 +2263,8 @@ def download_file(url: str, destination: Path, *, timeout: float = DOWNLOAD_TIME
                     total = int(headers.get("Content-Length") or 0)
                 except (TypeError, ValueError):
                     total = 0
+                content_encoding = str(headers.get("Content-Encoding") or "").strip().lower()
+            declared = total if content_encoding in ("", "identity") else 0
             with partial.open("wb") as handle:
                 while True:
                     chunk = response.read(64 * 1024)
@@ -2005,6 +2290,14 @@ def download_file(url: str, destination: Path, *, timeout: float = DOWNLOAD_TIME
     if written == 0:
         partial.unlink(missing_ok=True)
         raise DownloadError("The downloaded file was empty.")
+    wanted = int(expected_size) if expected_size else declared
+    if wanted and written != wanted:
+        partial.unlink(missing_ok=True)
+        raise DownloadError(
+            f"The download was incomplete: {written} of {wanted} bytes arrived "
+            f"({written / 1048576:.1f} of {wanted / 1048576:.1f} MiB). "
+            "Nothing was installed — please try again."
+        )
     if not looks_like_windows_executable(partial):
         partial.unlink(missing_ok=True)
         raise DownloadError("The downloaded file is not a Windows executable.")
@@ -2076,15 +2369,45 @@ def _bat_quote(path) -> str:
     return str(path).replace('"', "")
 
 
+@dataclass(frozen=True)
+class UpdateHandoff:
+    """The files the app and its swap script exchange across a restart."""
+
+    marker: Path
+    result: Path
+    log: Path
+
+
+def update_handoff(directory: Optional[Path] = None) -> UpdateHandoff:
+    """Where a swap script looks for the started build and leaves its verdict.
+
+    Defaults to the same folder as the app's log, so a failed update is
+    diagnosable from inside the app (⚙ Settings → *Open log file*) without
+    asking the user to find anything in %TEMP%.
+    """
+    base = Path(directory) if directory is not None else app_data_dir()
+    return UpdateHandoff(
+        marker=base / "startup-ok",
+        result=base / "update-result.txt",
+        log=base / f"{APP_NAME}-update.log",
+    )
+
+
 def build_windows_swap_script(new_exe, target_exe, wait_seconds: int = 120,
-                              backup: bool = True) -> str:
-    """A detached .bat that swaps in the new .exe once this process exits.
+                              backup: bool = True, *, version: Optional[str] = None,
+                              handoff: Optional[UpdateHandoff] = None,
+                              watch_seconds: int = 60) -> str:
+    """A detached .bat that swaps in the new .exe, proves it started, and rolls
+    back if it did not.
 
     Windows locks a running executable, so the copy is retried once a second
     until it succeeds (or `wait_seconds` elapse); `copy` failing while the old
     build is still alive is expected and simply loops. The previous executable
     is copied to "<name>.old" *before* the swap, so a bad build can always be
-    rolled back.
+    rolled back - but that copy is a working file, not a keepsake: it is
+    deleted again on every path out of this script (a build that came up, a
+    rollback that succeeded, or a swap that never happened), so no second
+    AutoTyper.exe is left lying next to the app once the dust settles.
 
     The script also clears PyInstaller's onefile variables and asks the
     bootloader for a full environment reset before starting the new build:
@@ -2092,24 +2415,57 @@ def build_windows_swap_script(new_exe, target_exe, wait_seconds: int = 120,
     process's temporary folder, skips unpacking and fails to load the Python
     DLL (the "error right after an update" that a manual double-click of the
     very same file does not show).
+
+    Starting it is not the same as *it starting*, so the script does not stop
+    there. It deletes the start-up marker, launches the new build and waits for
+    the new build to write that marker back once its window is up. If the
+    marker never appears, the previous build is restored and started again and
+    the whole story is written to `handoff.log` / `handoff.result` — the app
+    reports it the next time it opens instead of leaving the user with an app
+    that silently refuses to update.
     """
     new_path = _bat_quote(new_exe)
     target_path = _bat_quote(target_exe)
+    files = handoff if handoff is not None else update_handoff()
+    marker = _bat_quote(files.marker)
+    result = _bat_quote(files.result)
+    log = _bat_quote(files.log)
+    version_text = str(version) if version else ""
     # Taken while the old build is still in place: after the swap the target
     # *is* the new build, so a later copy would back up the wrong file.
     backup_lines = 'copy /Y "%TARGET%" "%TARGET%.old" >nul 2>&1\r\n' if backup else ""
+    # The backup is deleted again on every path out of the script: after a
+    # build that reported its window, after a swap that never happened, and
+    # after a successful rollback (a failed one keeps it - it is the only good
+    # copy left at that point).
+    discard_lines = 'del "%TARGET%.old" >nul 2>&1\r\n' if backup else ""
+    discard_after_restore = ('if not errorlevel 1 del "%TARGET%.old" >nul 2>&1\r\n'
+                             if backup else "")
     return (
         "@echo off\r\n"
         "setlocal\r\n"
         f'set "NEW={new_path}"\r\n'
         f'set "TARGET={target_path}"\r\n'
+        f'set "VERSION={version_text}"\r\n'
         f'set "TRIES={max(1, int(wait_seconds))}"\r\n'
+        f'set "WATCH={max(1, int(watch_seconds))}"\r\n'
+        f'set "MARKER={marker}"\r\n'
+        f'set "RESULT={result}"\r\n'
+        f'set "LOG={log}"\r\n'
         # Start the new build exactly like a hand-launched copy: no unpacked-
         # file paths from this process, and an explicit reset in case something
         # else re-adds them.
         f'set "{PYINSTALLER_RESET_ENV_VAR}=1"\r\n'
-        + "".join(f'set "{name}=\r\n' for name in PYINSTALLER_RUNTIME_ENV_VARS)
-        + "set /a COUNT=0\r\n"
+        # `set "NAME="` is cmd.exe's documented way to delete a variable: the
+        # quotes keep stray whitespace out of the value and an empty value
+        # removes the variable from the environment the next build inherits.
+        + "".join(f'set "{name}="\r\n' for name in PYINSTALLER_RUNTIME_ENV_VARS)
+        + 'for %%F in ("%TARGET%") do set "IMAGE=%%~nxF"\r\n'
+        'for %%D in ("%RESULT%") do set "DIR=%%~dpD"\r\n'
+        'if not exist "%DIR%" mkdir "%DIR%" >nul 2>&1\r\n'
+        "set /a COUNT=0\r\n"
+        "set /a GONE=0\r\n"
+        '>>"%LOG%" echo [%DATE% %TIME%] v%VERSION%: replacing "%TARGET%" (waiting for it to unlock).\r\n'
         f"{backup_lines}"
         ":waitloop\r\n"
         'copy /Y "%NEW%" "%TARGET%" >nul 2>&1\r\n'
@@ -2120,32 +2476,93 @@ def build_windows_swap_script(new_exe, target_exe, wait_seconds: int = 120,
         "goto waitloop\r\n"
         ":installed\r\n"
         'del "%NEW%" >nul 2>&1\r\n'
+        'del "%MARKER%" >nul 2>&1\r\n'
+        '>>"%LOG%" echo [%DATE% %TIME%] v%VERSION%: copied into place; starting it and waiting for its start-up signal.\r\n'
         'start "" "%TARGET%"\r\n'
-        '(goto) 2>nul & del "%~f0"\r\n'
+        "set /a WAITS=0\r\n"
+        ":watch\r\n"
+        "rem The marker names the version that wrote it, so a marker left by\r\n"
+        "rem some other build is not mistaken for the answer we are waiting for.\r\n"
+        'if not exist "%MARKER%" goto watching\r\n'
+        'findstr /C:"v%VERSION%" "%MARKER%" >nul 2>&1\r\n'
+        "if not errorlevel 1 goto started\r\n"
+        ":watching\r\n"
+        "set /a WAITS+=1\r\n"
+        "if %WAITS% GEQ %WATCH% goto notstarted\r\n"
+        # Log the first few waits: if the script ever dies or hangs in here,
+        # the log shows how far it got instead of ending at "starting it".
+        'if %WAITS% LEQ 3 >>"%LOG%" echo [%DATE% %TIME%] waiting for the start-up signal (%WAITS% of %WATCH%).\r\n'
+        # A build that died at once (instead of waiting for a click on its
+        # error box) should not keep the user waiting a minute for the
+        # rollback, so watch for the process disappearing as well.
+        f'tasklist /NH /FI "IMAGENAME eq %IMAGE%" 2>nul | find /I "%IMAGE%" >nul\r\n'
+        "if errorlevel 1 goto missing\r\n"
+        "set /a GONE=0\r\n"
+        "ping -n 2 127.0.0.1 >nul\r\n"
+        "goto watch\r\n"
+        ":missing\r\n"
+        "set /a GONE+=1\r\n"
+        "if %GONE% GEQ 10 goto notstarted\r\n"
+        "ping -n 2 127.0.0.1 >nul\r\n"
+        "goto watch\r\n"
+        ":started\r\n"
+        '>>"%RESULT%" echo ok v%VERSION%\r\n'
+        '>>"%LOG%" echo [%DATE% %TIME%] v%VERSION% started and signalled that its window is up; removing the backup.\r\n'
+        f"{discard_lines}"
+        "(goto) 2>nul & del \"%~f0\"\r\n"
+        ":notstarted\r\n"
+        "rem The new build never signalled that it came up: put the previous\r\n"
+        "rem build back and start it, so the user still has a working app.\r\n"
+        '>>"%RESULT%" echo rolled-back v%VERSION% the new build was installed but never signalled that its window came up\r\n'
+        '>>"%LOG%" echo [%DATE% %TIME%] v%VERSION% never signalled its start-up (waited %WATCH%s); restoring "%TARGET%.old".\r\n'
+        'copy /Y "%TARGET%.old" "%TARGET%" >nul 2>&1\r\n'
+        f"{discard_after_restore}"
+        'del "%MARKER%" >nul 2>&1\r\n'
+        'start "" "%TARGET%"\r\n'
+        "exit /b 1\r\n"
         ":giveup\r\n"
         "rem The swap never succeeded: bring the existing build back up so the\r\n"
         "rem user is not left without a working program.\r\n"
+        '>>"%RESULT%" echo rolled-back v%VERSION% the update file could not be copied over "%TARGET%"\r\n'
+        '>>"%LOG%" echo [%DATE% %TIME%] could not copy "%NEW%" over "%TARGET%" (tried %TRIES% times); starting the existing build.\r\n'
+        f"{discard_lines}"
         'start "" "%TARGET%"\r\n'
         "exit /b 1\r\n"
     )
 
 
-def build_posix_swap_script(new_exe, target_exe, pid: int = 0) -> str:
+def build_posix_swap_script(new_exe, target_exe, pid: int = 0, *,
+                            version: Optional[str] = None,
+                            handoff: Optional[UpdateHandoff] = None,
+                            watch_seconds: int = 60) -> str:
     """A detached shell script that swaps in the new build after the app exits.
 
     Kept for completeness (development builds on Linux/macOS); the packaged
     application is Windows-only. Like the Windows script it clears the
     PyInstaller onefile variables before relaunching, so the new build unpacks
-    its own files.
+    its own files, and it verifies the restart: the new build has to write the
+    start-up marker, otherwise the previous build is put back. The `<target>.old`
+    copy exists only for the duration of the swap and is removed again on every
+    path out of the script.
     """
+    files = handoff if handoff is not None else update_handoff()
+    version_text = str(version) if version else ""
     unset_lines = "".join(f"unset {name}\n" for name in PYINSTALLER_RUNTIME_ENV_VARS)
+    marker_check = (f'grep -q "v{version_text}" "$MARKER" 2>/dev/null &&\n  '
+                    if version_text else "")
     return (
         "#!/bin/sh\n"
         f'NEW="{new_exe}"\n'
         f'TARGET="{target_exe}"\n'
+        f'VERSION="{version_text}"\n'
+        f'MARKER="{files.marker}"\n'
+        f'RESULT="{files.result}"\n'
+        f'LOG="{files.log}"\n'
         f"PID={int(pid)}\n"
+        f"WATCH={max(1, int(watch_seconds))}\n"
         f"export {PYINSTALLER_RESET_ENV_VAR}=1\n"
         f"{unset_lines}"
+        'mkdir -p "$(dirname "$MARKER")" 2>/dev/null\n'
         "i=0\n"
         'while kill -0 "$PID" 2>/dev/null; do\n'
         "  i=$((i+1))\n"
@@ -2153,19 +2570,52 @@ def build_posix_swap_script(new_exe, target_exe, pid: int = 0) -> str:
         "  sleep 1\n"
         "done\n"
         'cp -f "$TARGET" "$TARGET.old" 2>/dev/null\n'
-        'mv -f "$NEW" "$TARGET" 2>/dev/null && chmod +x "$TARGET"\n'
+        'if ! mv -f "$NEW" "$TARGET" 2>/dev/null; then\n'
+        '  echo "rolled-back v$VERSION the update file could not be copied over $TARGET" >> "$RESULT"\n'
+        '  echo "[$(date "+%Y-%m-%d %H:%M:%S")] could not move $NEW over $TARGET; starting the existing build." >> "$LOG"\n'
+        '  rm -f "$TARGET.old"\n'
+        '  nohup "$TARGET" >/dev/null 2>&1 &\n'
+        '  rm -f "$0"\n'
+        "  exit 1\n"
+        "fi\n"
+        'chmod +x "$TARGET" 2>/dev/null\n'
+        'rm -f "$MARKER"\n'
+        'nohup "$TARGET" >/dev/null 2>&1 &\n'
+        "i=0\n"
+        'while [ "$i" -lt "$WATCH" ]; do\n'
+        f"  {marker_check}[ -f \"$MARKER\" ] && {{\n"
+        '    echo "ok v$VERSION" >> "$RESULT"\n'
+        '    echo "[$(date "+%Y-%m-%d %H:%M:%S")] v$VERSION started and signalled that its window is up; removing the backup." >> "$LOG"\n'
+        '    rm -f "$TARGET.old"\n'
+        '    rm -f "$0"\n'
+        "    exit 0\n"
+        "  }\n"
+        "  i=$((i+1))\n"
+        "  sleep 1\n"
+        "done\n"
+        'echo "rolled-back v$VERSION the new build was installed but never signalled that its window came up" >> "$RESULT"\n'
+        'echo "[$(date "+%Y-%m-%d %H:%M:%S")] v$VERSION never signalled its start-up; restoring $TARGET.old." >> "$LOG"\n'
+        'cp -f "$TARGET.old" "$TARGET" 2>/dev/null && rm -f "$TARGET.old"\n'
+        'chmod +x "$TARGET" 2>/dev/null\n'
+        'rm -f "$MARKER"\n'
         'nohup "$TARGET" >/dev/null 2>&1 &\n'
         'rm -f "$0"\n'
+        "exit 1\n"
     )
 
 
 def build_swap_script(new_exe, target_exe, pid: int = 0, *, windows: bool = None,
-                      wait_seconds: int = 120) -> str:
+                      wait_seconds: int = 120, version: Optional[str] = None,
+                      handoff: Optional[UpdateHandoff] = None,
+                      watch_seconds: int = 60) -> str:
     """Return the platform-appropriate swap script text."""
     on_windows = (os.name == "nt") if windows is None else windows
     if on_windows:
-        return build_windows_swap_script(new_exe, target_exe, wait_seconds=wait_seconds)
-    return build_posix_swap_script(new_exe, target_exe, pid)
+        return build_windows_swap_script(new_exe, target_exe,
+                                         wait_seconds=wait_seconds, version=version,
+                                         handoff=handoff, watch_seconds=watch_seconds)
+    return build_posix_swap_script(new_exe, target_exe, pid, version=version,
+                                   handoff=handoff, watch_seconds=watch_seconds)
 
 
 def launch_swap_script(script_path: Path, *, windows: bool = None) -> None:
@@ -2174,27 +2624,58 @@ def launch_swap_script(script_path: Path, *, windows: bool = None) -> None:
     The script is started with a scrubbed environment (`restart_environment`),
     so everything it starts later — including the new build — is launched as
     if the user had double-clicked it.
+
+    No file this process owns is handed to the script: the script writes its
+    own progress to the swap log, and a handle held here would make that write
+    fail. Its three standard handles point at the null device rather than being
+    left unset, so nothing of ours can be written to from the process that
+    outlives us.
+
+    On Windows the script gets its **own hidden console**. `cmd.exe` is happiest
+    with one — the first version spawned it fully detached and the script then
+    froze mid-loop on a real runner (the process alive, the swap log stuck
+    after "waiting for the start-up signal (1 of 20)"), while the identical
+    script run in the foreground, which has a console, finished both of its
+    outcomes. A new console that is never shown gives the script the conditions
+    it was written and tested for without putting a window in the user's face.
     """
     on_windows = (os.name == "nt") if windows is None else windows
     env = restart_environment()
     if on_windows:
         creationflags = 0
-        for flag in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP"):
+        for flag in ("CREATE_NEW_CONSOLE", "CREATE_NEW_PROCESS_GROUP"):
             creationflags |= getattr(subprocess, flag, 0)
-        subprocess.Popen(["cmd", "/c", str(script_path)], close_fds=True,
-                         env=env, creationflags=creationflags)
+        startupinfo = None
+        if hasattr(subprocess, "STARTUPINFO"):
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+            startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+        process = subprocess.Popen(
+            ["cmd", "/c", str(script_path)], close_fds=True, env=env,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, creationflags=creationflags,
+            startupinfo=startupinfo)
     else:
-        subprocess.Popen(["/bin/sh", str(script_path)], start_new_session=True,
-                         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        process = subprocess.Popen(
+            ["/bin/sh", str(script_path)], start_new_session=True, env=env,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL)
+    log_event(f"update: the swap script is running as pid {process.pid}")
 
 
 def install_update_and_restart(new_exe, target_exe=None, *, windows: bool = None,
-                               temp_dir: Optional[Path] = None, pid: Optional[int] = None) -> Path:
+                               temp_dir: Optional[Path] = None, pid: Optional[int] = None,
+                               version: Optional[str] = None,
+                               expected_size: Optional[int] = None,
+                               handoff: Optional[UpdateHandoff] = None,
+                               watch_seconds: int = 60) -> Path:
     """Arrange for `new_exe` to replace the running program and start it again.
 
     Returns the path of the swap script. The caller is expected to quit the
     application immediately afterwards: the script waits for this process to
-    exit before touching the executable.
+    exit before touching the executable, starts the new build, waits for it to
+    report its window (see `mark_startup_complete`) and puts the previous build
+    back if it never does.
     """
     on_windows = (os.name == "nt") if windows is None else windows
     new_exe = Path(new_exe)
@@ -2203,6 +2684,14 @@ def install_update_and_restart(new_exe, target_exe=None, *, windows: bool = None
         raise DownloadError("Cannot self-update: the running program is not a packaged executable.")
     if not new_exe.is_file():
         raise DownloadError(f"The downloaded update disappeared: {new_exe}")
+    if expected_size:
+        actual = new_exe.stat().st_size
+        if actual != int(expected_size):
+            raise DownloadError(
+                f"The staged update is the wrong size ({actual} of {expected_size} bytes), "
+                "so it was not installed. Please download it again.")
+    log_event(f"update: staging v{version or '?'} over {target_exe} "
+              f"(new build: {new_exe}, {describe_size(new_exe)})")
     stage = Path(temp_dir) if temp_dir is not None else Path(tempfile.gettempdir())
     try:
         stage.mkdir(parents=True, exist_ok=True)
@@ -2211,10 +2700,18 @@ def install_update_and_restart(new_exe, target_exe=None, *, windows: bool = None
     suffix = ".bat" if on_windows else ".sh"
     script_path = stage / f"{APP_NAME}-update{suffix}"
     process_id = int(pid if pid is not None else os.getpid())
-    script_path.write_text(
-        build_swap_script(new_exe, target_exe, process_id, windows=on_windows),
-        encoding="utf-8",
-    )
+    files = handoff if handoff is not None else update_handoff()
+    # `newline=""` matters: the script is written with CRLF line endings on
+    # purpose, and text mode would translate the \n inside them into CRLF
+    # again, leaving cmd.exe a stray carriage return on every line.
+    with script_path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(build_swap_script(new_exe, target_exe, process_id, windows=on_windows,
+                                       version=version, handoff=files,
+                                       watch_seconds=watch_seconds))
+    log_event(f"update: swap script written to {script_path} "
+              f"(waits for {files.marker}); starting it detached")
+    # A verdict from an older update must not be mistaken for this one's.
+    clear_update_result()
     if not on_windows:
         try:
             script_path.chmod(0o755)
@@ -3126,6 +3623,8 @@ class AutoTyperApp(_TkBase):
         self._download_exe_button = None
         self._update_check_button = None
         self._update_hint = None
+        self._log_button = None
+        self._log_hint = None
 
         try:
             self.style = ttk.Style(self)
@@ -3479,6 +3978,18 @@ class AutoTyperApp(_TkBase):
             updates_box, text="⬇ Download latest AutoTyper.exe", style="App.TButton",
             command=self._start_exe_download)
         self._download_exe_button.pack(anchor="w", pady=(8, 0))
+        # Updates are the one part of the app that can go wrong where the app
+        # itself is not there to explain it, so the record it leaves behind is
+        # one click away instead of buried in a hidden folder.
+        self._log_button = ttk.Button(updates_box, text="🗒 Open update log", style="App.TButton",
+                                      command=self._open_log_file)
+        self._log_button.pack(anchor="w", pady=(8, 0))
+        self._log_hint = tk.Label(
+            updates_box, bg=c["background"], fg=c["muted"], font=("Segoe UI", 8),
+            text=f"Updates write a log to {log_file_path()} — open it if an update "
+                 "ever fails to start.",
+            justify="left", anchor="w", wraplength=590)
+        self._log_hint.pack(anchor="w", pady=(4, 0))
 
         preview_box = tk.LabelFrame(outer, text=" Live preview ", bg=c["background"],
                                     fg=c["primary"], bd=1, relief="groove",
@@ -3503,7 +4014,7 @@ class AutoTyperApp(_TkBase):
                                         preview_box, preview,
                                         self._settings_title, self._settings_subtitle,
                                         self._custom_hint, self._update_hint,
-                                        self._topmost_checkbutton]
+                                        self._log_hint, self._topmost_checkbutton]
         self._settings_headings = [palette_box, custom_box, window_box, updates_box,
                                    preview_box]
 
@@ -3684,6 +4195,18 @@ class AutoTyperApp(_TkBase):
             except tk.TclError:
                 pass
 
+    def _open_log_file(self):
+        """Show the update/diagnostics log (see `log_event`)."""
+        path = log_file_path()
+        log_event("log: opened from the settings window")  # also creates the file
+        if open_path(path):
+            return
+        messagebox.showinfo(
+            "Update log",
+            f"AutoTyper's update log is:\n{path}\n\nThe swap script writes to:\n{swap_log_path()}",
+            parent=self,
+        )
+
     def _set_download_button_state(self, state: str):
         """Enable/disable the settings download button while a fetch runs."""
         button = getattr(self, "_download_exe_button", None)
@@ -3716,6 +4239,8 @@ class AutoTyperApp(_TkBase):
         self._download_exe_button = None
         self._update_check_button = None
         self._update_hint = None
+        self._log_button = None
+        self._log_hint = None
         self._preview_widgets = {}
 
     # ------------------------------------------------------------------
@@ -4127,11 +4652,18 @@ class AutoTyperApp(_TkBase):
                 return
             label = f"v{plan.version}" if plan.version else "the latest release"
             self._post("status", f"Status: Downloading {asset.name} ({label})...", self.colors["accent"])
+            log_event(f"update: downloading {asset.url} ({asset.size} bytes) to {plan.destination}")
             path = download_file(
                 asset.url,
                 plan.destination,
                 progress=lambda done, total: self._post("progress", done, total or None),
+                # The size the release advertises: a transfer that stops early
+                # is rejected here instead of being installed and then failing
+                # to start (which looks exactly like "the update keeps
+                # breaking").
+                expected_size=asset.size,
             )
+            log_event(f"update: downloaded {path} ({describe_size(path)})")
         except DownloadError as err:
             self._post("download_result", "failed", str(err))
             return
@@ -4164,11 +4696,14 @@ class AutoTyperApp(_TkBase):
                 "Install update",
                 f"{APP_NAME} {label} has been downloaded.\n\n"
                 "Install it now?\n\n"
-                f"The current version is kept as a backup ({Path(path).name}.old), "
-                "and the app restarts automatically.",
+                "The app closes, replaces itself and opens again. If the new build "
+                "does not come up, the previous one is restored and started instead; "
+                f"the spare copy that makes that possible ({Path(path).name}.old) is "
+                "deleted as soon as the new build reports its window, so nothing "
+                "extra is left next to the program.",
                 icon="question", parent=self,
             ):
-                self._install_downloaded_update(path)
+                self._install_downloaded_update(path, version)
             else:
                 self._post("status", f"Status: Downloaded {label} (not installed)",
                            self.colors["foreground"])
@@ -4185,15 +4720,17 @@ class AutoTyperApp(_TkBase):
         )
         open_in_file_manager(path)
 
-    def _install_downloaded_update(self, path: str):
+    def _install_downloaded_update(self, path: str, version: Optional[str] = None):
         """Swap in the new executable and quit so the swap script can run.
 
         `path` is the *staged* download in the temp folder; the build it
-        replaces is the one currently running.
+        replaces is the one currently running. The swap script watches the new
+        build come up and restores this one if it does not.
         """
         try:
-            script = install_update_and_restart(path, running_executable())
+            script = install_update_and_restart(path, running_executable(), version=version)
         except DownloadError as err:
+            log_event(f"update: refused to install {path}: {err}")
             messagebox.showerror("Could not install the update", str(err), parent=self)
             return
         self._post("status", "Status: Restarting with the new version...", self.colors["accent"])
@@ -4204,8 +4741,10 @@ class AutoTyperApp(_TkBase):
         messagebox.showinfo(
             "Restarting",
             f"{APP_NAME} will now close and reopen with the new version.\n\n"
-            f"(The swap script is {script.name} in your temp folder; your previous "
-            "build is kept as a .old backup.)",
+            f"(The swap script is {script.name} in your temp folder. Your previous "
+            "build is kept only until the new one reports its window: if it never "
+            "comes up, that copy is put back and started, and either way nothing is "
+            "left behind next to the program.)",
             parent=self,
         )
         self._quit_for_restart()
@@ -4235,7 +4774,9 @@ def main(argv=None):
     # manager, a helper such as pbpaste) then inherits a clean environment,
     # and a restarted build unpacks its own files. See the notes on
     # `restart_environment` at the top of section 10.
+    capture_startup_runtime_environment()
     scrub_pyinstaller_runtime_environment()
+    log_startup_environment()
 
     ap = argparse.ArgumentParser(description="AutoTyper: Biomechanical Keystroke Simulator")
     ap.add_argument("--benchmark", action="store_true", help="simulate trace and print biomechanical metrics")
@@ -4298,7 +4839,8 @@ def main(argv=None):
                 print(f"\r  {done / 1048576:6.1f} / {total / 1048576:.1f} MiB", end="", flush=True)
 
         try:
-            path = download_file(asset.url, destination, progress=report)
+            path = download_file(asset.url, destination, progress=report,
+                                 expected_size=asset.size)
         except DownloadError as err:
             print(f"\nDownload failed: {err}", file=sys.stderr)
             return 1
@@ -4308,11 +4850,14 @@ def main(argv=None):
                 print("Not a packaged build, so nothing was replaced; run the .exe above to update.")
                 return 0
             try:
-                script = install_update_and_restart(path)
+                script = install_update_and_restart(path, version=release.version,
+                                                    expected_size=asset.size)
             except DownloadError as err:
                 print(f"Could not install the update: {err}", file=sys.stderr)
                 return 1
-            print(f"Update staged ({script.name}); close this program and it will restart on v{release.version}.")
+            print(f"Update staged ({script.name}); close this program and it will restart on "
+                  f"v{release.version} (or come back on v{APP_VERSION} if the new build does "
+                  "not start).")
         return 0
 
     if args.benchmark:
@@ -4340,7 +4885,14 @@ def main(argv=None):
         print("tkinter is not available in this Python install; use --benchmark for headless CLI execution.",
               file=sys.stderr)
         return 1
-    AutoTyperApp().mainloop()
+    app = AutoTyperApp()
+    # Tell the update swap script (if one is waiting) that this build really
+    # did come up. Without this signal it assumes the start failed and puts the
+    # previous build back.
+    mark_startup_complete()
+    remove_previous_build_backup()
+    report_previous_update(app)
+    app.mainloop()
     return 0
 
 

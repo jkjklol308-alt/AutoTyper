@@ -20,6 +20,8 @@ on:
       - main
     paths:
       - "tools/render_picker_probe.py"
+      - "tools/update_restart_probe.py"
+      - "tools/update_restart_probe_broken.py"
       - "auto_typer.py"
       - "AutoTyper.spec"
       - ".github/workflows/diagnostics.yml"
@@ -82,6 +84,322 @@ jobs:
         # errors in a message box, which would hang the runner instead of
         # failing. The onefile environment handling under test is identical.
         run: pyinstaller --onefile --console --noconfirm --name AutoTyperProbe --distpath dist-probe auto_typer.py
+
+      - name: Prove the swap script's clearing lines empty the onefile environment
+        shell: python
+        run: |
+          # "Error loading Python DLL" after an update comes from the new build
+          # inheriting the previous process's unpacked-file paths. The swap
+          # script clears those variables before starting it, and this runs the
+          # *generated* lines on a real cmd.exe to show that they really do.
+          import pathlib
+          import subprocess
+          import sys
+
+          sys.path.insert(0, ".")
+          import auto_typer as at
+
+          script = at.build_windows_swap_script(r"C:\Temp\new.exe", r"C:\Temp\target.exe",
+                                                version="1.0.0")
+          clearing = [line for line in script.splitlines()
+                      if line.startswith('set "') and "=" in line
+                      and (line.startswith('set "_PYI') or line.startswith('set "_MEI')
+                           or line.startswith('set "PYINSTALLER'))]
+          if not clearing:
+              sys.exit("the generated swap script clears nothing")
+
+          body = ["@echo off"]
+          # What the running onefile app has in its environment...
+          body += [f'set "{name}=stale-value"' for name in at.PYINSTALLER_RUNTIME_ENV_VARS]
+          # ...then exactly the lines the swap script uses, verbatim.
+          body += clearing
+          body += [f'echo {name}=[%{name}%]' for name in at.PYINSTALLER_RUNTIME_ENV_VARS]
+          body += ['echo RESET=[%PYINSTALLER_RESET_ENVIRONMENT%]']
+
+          bat = pathlib.Path("onefile-env.bat")
+          bat.write_text("\r\n".join(body) + "\r\n", encoding="utf-8")
+          out = subprocess.run(["cmd", "/c", str(bat)], capture_output=True, text=True).stdout
+          print(out)
+          for name in at.PYINSTALLER_RUNTIME_ENV_VARS:
+              if f"{name}=[]" not in out:
+                  sys.exit(f"{name} survived the swap script's clearing lines")
+          if "RESET=[1]" not in out:
+              sys.exit("the reset request is not handed to the new build")
+
+      - name: Build the ends of a real self-update (old, new and broken builds)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p e2e/old/tools e2e/new/tools
+          for tree in old new; do
+            cp auto_typer.py "e2e/$tree/auto_typer.py"
+            cp tools/update_restart_probe.py "e2e/$tree/tools/update_restart_probe.py"
+          done
+          # The "new" build is a genuinely different build: bump its version.
+          python - "$PWD" <<'PY'
+          import pathlib, re, sys
+          root = pathlib.Path(sys.argv[1]) / "e2e" / "new" / "auto_typer.py"
+          text = root.read_text(encoding="utf-8")
+          root.write_text(re.sub(r'APP_VERSION = "[^"]+"', 'APP_VERSION = "9.9.9"', text, count=1),
+                          encoding="utf-8")
+          PY
+          pyinstaller --onefile --console --noconfirm --name OldBuild --distpath e2e/dist \
+            --workpath e2e/work-old --specpath e2e/spec --paths e2e/old \
+            e2e/old/tools/update_restart_probe.py
+          pyinstaller --onefile --console --noconfirm --name NewBuild --distpath e2e/dist \
+            --workpath e2e/work-new --specpath e2e/spec --paths e2e/new \
+            e2e/new/tools/update_restart_probe.py
+          pyinstaller --onefile --console --noconfirm --name BrokenBuild --distpath e2e/dist \
+            --workpath e2e/work-broken --specpath e2e/spec \
+            tools/update_restart_probe_broken.py
+          ls -l e2e/dist
+
+      # The two steps below are the ones that test the *reported* failure on a
+      # real machine. They report everything they know through the check-run
+      # API (annotations and the step summary), because the job logs of a
+      # Windows runner are not always reachable from where this is reviewed.
+      - name: Run the generated swap script itself (real cmd.exe, both outcomes)
+        shell: pwsh
+        run: |
+          # A batch file that dies half way through is silent when the app
+          # starts it detached, so run it here in the foreground - with its
+          # output captured - for both a build that signals its start-up and
+          # one that never does. Start-Process is used instead of a pipeline on
+          # purpose: `python ... 2>&1` throws under the runner's
+          # $ErrorActionPreference = "Stop" as soon as anything reaches stderr,
+          # which would lose the report this step exists to publish.
+          $out = Join-Path $env:TEMP "swap-script-probe.out"
+          $err = Join-Path $env:TEMP "swap-script-probe.err"
+          Remove-Item $out, $err -ErrorAction SilentlyContinue
+          $probe = Start-Process -FilePath "python" -PassThru -NoNewWindow -Wait `
+            -RedirectStandardOutput $out -RedirectStandardError $err `
+            -ArgumentList @("tools/swap_script_probe.py", "--work", "$env:TEMP\swap-ci",
+                            "--good", "e2e/dist/NewBuild.exe", "--broken", "e2e/dist/BrokenBuild.exe",
+                            "--version", "9.9.9", "--watch", "20")
+          $report = (Get-Content $out -Raw -ErrorAction SilentlyContinue)
+          $problems = (Get-Content $err -Raw -ErrorAction SilentlyContinue)
+          Write-Host $report
+          if ($problems) { Write-Host "stderr: $problems" }
+          $summary = (($report + "`nstderr: " + $problems) -replace "`r?`n", " ")
+          if ($summary.Length -gt 3200) { $summary = $summary.Substring(0, 3200) }
+          if ($probe.ExitCode -ne 0) {
+            Write-Host "::error::AUTOTYPER-SWAP-SCRIPT-FAIL:$summary"
+            $report | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            $problems | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            throw "the generated swap script did not behave"
+          }
+          Write-Host "::notice::AUTOTYPER-SWAP-SCRIPT-OK:$summary"
+
+      - name: Watch what becomes of the detached swap script
+        shell: pwsh
+        run: |
+          # The app starts the swap script detached and quits, and a script
+          # that dies instead of finishing leaves nothing behind but a missing
+          # verdict. This step watches it from the outside - is cmd.exe still
+          # alive, is the swap log still growing, does a verdict appear - so a
+          # report of "the update did nothing" comes with the script's fate
+          # rather than a guess. It runs before the two end-to-end steps and
+          # publishes its trace through the check-run API like they do.
+          $root = Join-Path $env:TEMP "detach-watch"
+          Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
+          $app = Join-Path $root "app\AutoTyper.exe"
+          New-Item -ItemType Directory -Force -Path (Split-Path $app) | Out-Null
+          Copy-Item "e2e/dist/OldBuild.exe" $app
+          $new = (Resolve-Path "e2e/dist/NewBuild.exe").Path
+          $data = Join-Path $env:LOCALAPPDATA "AutoTyper"
+          $log = Join-Path $data "AutoTyper-update.log"
+          $result = Join-Path $data "update-result.txt"
+          Remove-Item $result -ErrorAction SilentlyContinue
+
+          $state = [ordered]@{ trace = @() }
+          try {
+            & $app --self-update $app $new 9.9.9 --watch 20
+            $state["probe_exit"] = $LASTEXITCODE
+            if ($LASTEXITCODE -ne 0) { throw "the probe could not stage the update" }
+
+            $seen = ""
+            $deadline = (Get-Date).AddSeconds(120)
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            while ((Get-Date) -lt $deadline) {
+              $scripts = @(Get-CimInstance Win32_Process -Filter "Name='cmd.exe'" `
+                           -ErrorAction SilentlyContinue |
+                           Where-Object { $_.CommandLine -like "*AutoTyper-update.bat*" } |
+                           Select-Object -ExpandProperty ProcessId)
+              # What the script is waiting for, if it stops moving: its own
+              # children (ping, tasklist, find, the new build) name the culprit.
+              $children = @()
+              foreach ($script_pid in $scripts) {
+                $children += @(Get-CimInstance Win32_Process `
+                               -Filter "ParentProcessId=$script_pid" `
+                               -ErrorAction SilentlyContinue |
+                               ForEach-Object { "$($_.Name):$($_.ProcessId)" })
+              }
+              $bytes = (Get-Item $log -ErrorAction SilentlyContinue).Length
+              $text = $null
+              if (Test-Path $result) { $text = Get-Content $result -Raw -ErrorAction SilentlyContinue }
+              $fingerprint = "$scripts|$children|$bytes|$text"
+              if ($fingerprint -ne $seen) {
+                $seen = $fingerprint
+                $state["trace"] += [ordered]@{ t = [int]$sw.Elapsed.TotalSeconds
+                                               script_pids = $scripts
+                                               children = $children
+                                               log_bytes = $bytes
+                                               verdict = "$text" }
+              }
+              if ($text) { $state["verdict"] = "$text"; break }
+              Start-Sleep -Seconds 2
+            }
+            $state["log_tail"] = ((Get-Content $log -ErrorAction SilentlyContinue |
+                                   Select-Object -Last 6) -join " | ")
+            Write-Host "::notice::AUTOTYPER-DETACH-WATCH:$(($state | ConvertTo-Json -Compress -Depth 5))"
+            if ("$($state["verdict"])" -notmatch "ok v9\.9\.9") {
+              throw "the detached swap script never left a verdict: '$($state["verdict"])'"
+            }
+          } catch {
+            $state["error"] = "$_"
+            Write-Host "::error::AUTOTYPER-DETACH-WATCH-FAIL:$(($state | ConvertTo-Json -Compress -Depth 5))"
+            throw
+          }
+
+      - name: A real update replaces the build, and the new build comes up
+        shell: pwsh
+        run: |
+          $app = Join-Path $PWD "e2e/app/AutoTyper.exe"
+          $data = Join-Path $env:LOCALAPPDATA "AutoTyper"
+          New-Item -ItemType Directory -Force -Path (Split-Path $app) | Out-Null
+          Copy-Item "e2e/dist/OldBuild.exe" $app
+          $new = (Resolve-Path "e2e/dist/NewBuild.exe").Path
+          $report = Join-Path $data "probe-report.txt"
+          Remove-Item $report -ErrorAction SilentlyContinue
+
+          $state = [ordered]@{}
+          try {
+            & $app --self-update $app $new 9.9.9
+            $state["probe_exit"] = $LASTEXITCODE
+            if ($LASTEXITCODE -ne 0) { throw "the probe could not stage the update" }
+
+            # The copy lands first; the verdict is written only after the
+            # script has watched the new build come up (or given up on it), so
+            # wait for the verdict rather than for the file to change - and for
+            # it to have content, because an empty file is not a verdict.
+            $verdictFile = Join-Path $data "update-result.txt"
+            $state["verdict"] = $null
+            $deadline = (Get-Date).AddSeconds(240)
+            while ((Get-Date) -lt $deadline) {
+              if (Test-Path $verdictFile) {
+                $text = Get-Content $verdictFile -Raw -ErrorAction SilentlyContinue
+                if ($text) { $state["verdict"] = $text; break }
+              }
+              Start-Sleep -Seconds 1
+            }
+            $state["installed_hash"] = (Get-FileHash $app).Hash
+            $state["new_hash"] = (Get-FileHash $new).Hash
+            $state["marker"] = (Get-Content (Join-Path $data "startup-ok") -Raw -ErrorAction SilentlyContinue)
+            $state["report"] = (Get-Content $report -Raw -ErrorAction SilentlyContinue)
+            $state["app_log"] = (Get-Content (Join-Path $data "AutoTyper.log") -Raw -ErrorAction SilentlyContinue)
+            $state["swap_log"] = (Get-Content (Join-Path $data "AutoTyper-update.log") -Raw -ErrorAction SilentlyContinue)
+            $state["bat"] = (Get-Content (Join-Path $env:TEMP "AutoTyper-update.bat") -Raw -ErrorAction SilentlyContinue)
+
+            if ($state["installed_hash"] -ne $state["new_hash"]) {
+              throw "the installed build was never replaced by the new one"
+            }
+            # The backup is a working file, not a keepsake: it must be gone
+            # again once the new build has reported its window.
+            if (Test-Path "${app}.old") {
+              throw "the previous build's backup was left behind next to the app"
+            }
+            # Interpolate into a string: `$null -notmatch ...` is not the
+            # check it looks like, and a missing verdict must fail loudly
+            # instead of reading as "nothing to complain about".
+            if ("$($state["verdict"])" -notmatch "ok v9\.9\.9") {
+              throw "the swap script did not report a started build: '$($state["verdict"])'"
+            }
+            if ("$($state["marker"])" -notmatch "v9\.9\.9") {
+              throw "the new build never signalled its window: '$($state["marker"])'"
+            }
+            if ($state["report"] -notmatch "v9\.9\.9 started from") {
+              throw "the wrong build answered: $($state["report"])"
+            }
+            # The new build must be unpacking its own files. It reports the
+            # state it was *handed* (captured before its own scrub), so both
+            # "fresh" and "own extraction dir" are healthy; only a build
+            # pointed at another process's deleted folder is not.
+            if ($state["report"] -notmatch "meipass=[A-Za-z]:\\") {
+              throw "the new build did not report a real extraction folder: $($state["report"])"
+            }
+            if ($state["report"] -match "NOT this build's extraction dir") {
+              throw "the new build inherited someone else's extraction folder: $($state["report"])"
+            }
+            Write-Host "::notice::AUTOTYPER-E2E-UPDATE:$(($state | ConvertTo-Json -Compress))"
+          } catch {
+            $state["error"] = "$_"
+            $json = ($state | ConvertTo-Json -Compress)
+            Write-Host "::error::AUTOTYPER-E2E-UPDATE-FAIL:$json"
+            "## End-to-end update failure" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            ($state | ConvertTo-Json) | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            throw
+          }
+
+      - name: A new build that never starts is rolled back and the app comes back
+        shell: pwsh
+        run: |
+          $app = Join-Path $PWD "e2e/app/AutoTyper.exe"
+          $data = Join-Path $env:LOCALAPPDATA "AutoTyper"
+          $good = (Resolve-Path "e2e/dist/NewBuild.exe").Path
+          $broken = (Resolve-Path "e2e/dist/BrokenBuild.exe").Path
+          $report = Join-Path $data "probe-report.txt"
+          $result = Join-Path $data "update-result.txt"
+          Remove-Item $result -ErrorAction SilentlyContinue
+          $goodHash = (Get-FileHash $good).Hash
+          $before = (Get-Content $report -Raw).Split("`n").Count
+
+          $state = [ordered]@{}
+          try {
+            # A short watch window: CI should not have to wait a minute for it.
+            & $app --self-update $app $broken 0.0.0 --watch 15
+            $state["probe_exit"] = $LASTEXITCODE
+            if ($LASTEXITCODE -ne 0) { throw "the probe could not stage the rollback case" }
+
+            $state["verdict"] = $null
+            $deadline = (Get-Date).AddSeconds(180)
+            while ((Get-Date) -lt $deadline) {
+              if (Test-Path $result) {
+                $text = Get-Content $result -Raw -ErrorAction SilentlyContinue
+                if ($text) { $state["verdict"] = $text; break }
+              }
+              Start-Sleep -Seconds 1
+            }
+            if ("$($state["verdict"])" -notmatch "rolled-back v0\.0\.0") {
+              throw "expected a rollback, got: '$($state["verdict"])'"
+            }
+            $state["restored_hash"] = (Get-FileHash $app).Hash
+            $state["good_hash"] = $goodHash
+            if ($state["restored_hash"] -ne $goodHash) { throw "the working build was not restored" }
+            if (Test-Path "${app}.old") {
+              throw "the rollback left a backup of the previous build behind"
+            }
+
+            # ...and the restored build has to be started again, not just put back.
+            $deadline = (Get-Date).AddSeconds(90)
+            while ((Get-Date) -lt $deadline) {
+              $lines = (Get-Content $report -Raw).Split("`n")
+              if ($lines.Count -gt $before -and ($lines -join "`n") -match "v9\.9\.9 started from") { break }
+              Start-Sleep -Seconds 1
+            }
+            $state["report"] = (Get-Content $report -Raw -ErrorAction SilentlyContinue)
+            $state["swap_log"] = (Get-Content (Join-Path $data "AutoTyper-update.log") -Raw -ErrorAction SilentlyContinue)
+            $state["bat"] = (Get-Content (Join-Path $env:TEMP "AutoTyper-update.bat") -Raw -ErrorAction SilentlyContinue)
+            $lines = $state["report"].Split("`n")
+            if ($lines.Count -le $before) { throw "the restored build was never started" }
+            Write-Host "::notice::AUTOTYPER-E2E-ROLLBACK:$(($state | ConvertTo-Json -Compress))"
+          } catch {
+            $state["error"] = "$_"
+            $json = ($state | ConvertTo-Json -Compress)
+            Write-Host "::error::AUTOTYPER-E2E-ROLLBACK-FAIL:$json"
+            "## End-to-end rollback failure" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            ($state | ConvertTo-Json) | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            throw
+          }
 
       - name: Check a onefile build starts with a stale PyInstaller environment
         shell: pwsh
