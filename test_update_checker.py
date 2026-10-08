@@ -125,8 +125,8 @@ class IsNewerVersionTests(unittest.TestCase):
 
 
 class AppVersionTests(unittest.TestCase):
-    def test_shipped_version_is_1_1_4(self):
-        self.assertEqual(at.APP_VERSION, "1.1.4")
+    def test_shipped_version_is_1_2_0(self):
+        self.assertEqual(at.APP_VERSION, "1.2.0")
 
     def test_points_at_this_repository(self):
         self.assertEqual(at.GITHUB_REPO, "jkjklol308-alt/AutoTyper")
