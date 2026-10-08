@@ -90,7 +90,7 @@ try:
 except ImportError:
     tk = messagebox = ttk = None
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 APP_NAME = "AutoTyper"
 GITHUB_REPO = "jkjklol308-alt/AutoTyper"
 EXE_ASSET_NAME = "AutoTyper.exe"
@@ -4109,11 +4109,16 @@ class AutoTyperApp(_TkBase):
             )
         for scale in (getattr(self, "wpm_scale", None), getattr(self, "typo_scale", None)):
             if scale is not None:
+                # v1.2.1: the trough (slider bar) was coloured ``surface``,
+                # which matches ``background`` on dark themes and is white on
+                # light themes, so the bar effectively vanished. Using the
+                # accent colour makes the track clearly visible, while the
+                # primary-coloured handle stays distinct against it.
                 scale.configure(
-                    bg=self.colors["background"],
+                    bg=self.colors["primary"],
                     fg=self.colors["foreground"],
-                    troughcolor=self.colors["surface"],
-                    activebackground=self.colors["accent"],
+                    troughcolor=self.colors["accent"],
+                    activebackground=self.colors["primary"],
                     highlightbackground=self.colors["background"],
                 )
         self._refresh_settings_window()
