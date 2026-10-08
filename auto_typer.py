@@ -27,7 +27,8 @@ A next-generation human typing simulator implementing:
      upgrade.
   9. .exe Delivery: updates download the published AutoTyper.exe rather than a
      Python script. A packaged build swaps itself in and restarts
-     automatically (keeping a .old backup); a build running from source saves
+     automatically (keeping a .old backup only as long as the swap needs it);
+     a build running from source saves
      the executable next to the user's other downloads. Since v1.1.2 the
      restart is started with a clean environment, exactly like a manual
      double-click: PyInstaller's onefile variables are cleared first, so the
@@ -84,7 +85,7 @@ try:
 except ImportError:
     tk = messagebox = ttk = None
 
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.1.4"
 APP_NAME = "AutoTyper"
 GITHUB_REPO = "jkjklol308-alt/AutoTyper"
 EXE_ASSET_NAME = "AutoTyper.exe"
@@ -1577,7 +1578,8 @@ class TracePlayer:
 #     new build, saving it next to their other downloads, or doing nothing.
 #   * Installing is safe: the replacement happens after the running process
 #     exits (Windows keeps the .exe locked while it runs), a .old backup of the
-#     previous executable is left behind, and a download that is not a real
+#     previous executable guards the swap and is deleted once the new build has
+#     proved it comes up, and a download that is not a real
 #     Windows executable is rejected before anything is touched.
 #   * Restarting is clean: the relaunch is started without PyInstaller's
 #     onefile bookkeeping in the environment (see
@@ -2087,6 +2089,32 @@ def mark_startup_complete() -> Path:
     return marker
 
 
+def remove_previous_build_backup() -> Optional[Path]:
+    """Delete the spare copy a stuck or older update may have left behind.
+
+    The swap script removes its own backup on every path out of it, so this is
+    housekeeping for the leftovers: an update whose script was killed outright
+    (a reboot, a closed laptop) and copies left by older versions, which kept
+    the backup for good.
+
+    Only called once this window is up, which is exactly the point at which the
+    script stops needing the backup: it exists to undo a build that never
+    reported its window, and that has now been reported.
+    """
+    exe = running_executable()
+    if exe is None:
+        return None
+    backup = Path(str(exe) + ".old")
+    try:
+        if not backup.is_file():
+            return None
+        backup.unlink()
+    except OSError:
+        return None
+    log_event(f"start: removed a leftover backup of the previous build ({backup.name})")
+    return backup
+
+
 def clear_startup_marker() -> None:
     try:
         startup_marker_path().unlink(missing_ok=True)
@@ -2376,7 +2404,10 @@ def build_windows_swap_script(new_exe, target_exe, wait_seconds: int = 120,
     until it succeeds (or `wait_seconds` elapse); `copy` failing while the old
     build is still alive is expected and simply loops. The previous executable
     is copied to "<name>.old" *before* the swap, so a bad build can always be
-    rolled back.
+    rolled back - but that copy is a working file, not a keepsake: it is
+    deleted again on every path out of this script (a build that came up, a
+    rollback that succeeded, or a swap that never happened), so no second
+    AutoTyper.exe is left lying next to the app once the dust settles.
 
     The script also clears PyInstaller's onefile variables and asks the
     bootloader for a full environment reset before starting the new build:
@@ -2403,6 +2434,13 @@ def build_windows_swap_script(new_exe, target_exe, wait_seconds: int = 120,
     # Taken while the old build is still in place: after the swap the target
     # *is* the new build, so a later copy would back up the wrong file.
     backup_lines = 'copy /Y "%TARGET%" "%TARGET%.old" >nul 2>&1\r\n' if backup else ""
+    # The backup is deleted again on every path out of the script: after a
+    # build that reported its window, after a swap that never happened, and
+    # after a successful rollback (a failed one keeps it - it is the only good
+    # copy left at that point).
+    discard_lines = 'del "%TARGET%.old" >nul 2>&1\r\n' if backup else ""
+    discard_after_restore = ('if not errorlevel 1 del "%TARGET%.old" >nul 2>&1\r\n'
+                             if backup else "")
     return (
         "@echo off\r\n"
         "setlocal\r\n"
@@ -2469,7 +2507,8 @@ def build_windows_swap_script(new_exe, target_exe, wait_seconds: int = 120,
         "goto watch\r\n"
         ":started\r\n"
         '>>"%RESULT%" echo ok v%VERSION%\r\n'
-        '>>"%LOG%" echo [%DATE% %TIME%] v%VERSION% started and signalled that its window is up.\r\n'
+        '>>"%LOG%" echo [%DATE% %TIME%] v%VERSION% started and signalled that its window is up; removing the backup.\r\n'
+        f"{discard_lines}"
         "(goto) 2>nul & del \"%~f0\"\r\n"
         ":notstarted\r\n"
         "rem The new build never signalled that it came up: put the previous\r\n"
@@ -2477,6 +2516,7 @@ def build_windows_swap_script(new_exe, target_exe, wait_seconds: int = 120,
         '>>"%RESULT%" echo rolled-back v%VERSION% the new build was installed but never signalled that its window came up\r\n'
         '>>"%LOG%" echo [%DATE% %TIME%] v%VERSION% never signalled its start-up (waited %WATCH%s); restoring "%TARGET%.old".\r\n'
         'copy /Y "%TARGET%.old" "%TARGET%" >nul 2>&1\r\n'
+        f"{discard_after_restore}"
         'del "%MARKER%" >nul 2>&1\r\n'
         'start "" "%TARGET%"\r\n'
         "exit /b 1\r\n"
@@ -2485,6 +2525,7 @@ def build_windows_swap_script(new_exe, target_exe, wait_seconds: int = 120,
         "rem user is not left without a working program.\r\n"
         '>>"%RESULT%" echo rolled-back v%VERSION% the update file could not be copied over "%TARGET%"\r\n'
         '>>"%LOG%" echo [%DATE% %TIME%] could not copy "%NEW%" over "%TARGET%" (tried %TRIES% times); starting the existing build.\r\n'
+        f"{discard_lines}"
         'start "" "%TARGET%"\r\n'
         "exit /b 1\r\n"
     )
@@ -2500,7 +2541,9 @@ def build_posix_swap_script(new_exe, target_exe, pid: int = 0, *,
     application is Windows-only. Like the Windows script it clears the
     PyInstaller onefile variables before relaunching, so the new build unpacks
     its own files, and it verifies the restart: the new build has to write the
-    start-up marker, otherwise the previous build is put back.
+    start-up marker, otherwise the previous build is put back. The `<target>.old`
+    copy exists only for the duration of the swap and is removed again on every
+    path out of the script.
     """
     files = handoff if handoff is not None else update_handoff()
     version_text = str(version) if version else ""
@@ -2530,6 +2573,7 @@ def build_posix_swap_script(new_exe, target_exe, pid: int = 0, *,
         'if ! mv -f "$NEW" "$TARGET" 2>/dev/null; then\n'
         '  echo "rolled-back v$VERSION the update file could not be copied over $TARGET" >> "$RESULT"\n'
         '  echo "[$(date "+%Y-%m-%d %H:%M:%S")] could not move $NEW over $TARGET; starting the existing build." >> "$LOG"\n'
+        '  rm -f "$TARGET.old"\n'
         '  nohup "$TARGET" >/dev/null 2>&1 &\n'
         '  rm -f "$0"\n'
         "  exit 1\n"
@@ -2541,7 +2585,8 @@ def build_posix_swap_script(new_exe, target_exe, pid: int = 0, *,
         'while [ "$i" -lt "$WATCH" ]; do\n'
         f"  {marker_check}[ -f \"$MARKER\" ] && {{\n"
         '    echo "ok v$VERSION" >> "$RESULT"\n'
-        '    echo "[$(date "+%Y-%m-%d %H:%M:%S")] v$VERSION started and signalled that its window is up." >> "$LOG"\n'
+        '    echo "[$(date "+%Y-%m-%d %H:%M:%S")] v$VERSION started and signalled that its window is up; removing the backup." >> "$LOG"\n'
+        '    rm -f "$TARGET.old"\n'
         '    rm -f "$0"\n'
         "    exit 0\n"
         "  }\n"
@@ -2550,7 +2595,7 @@ def build_posix_swap_script(new_exe, target_exe, pid: int = 0, *,
         "done\n"
         'echo "rolled-back v$VERSION the new build was installed but never signalled that its window came up" >> "$RESULT"\n'
         'echo "[$(date "+%Y-%m-%d %H:%M:%S")] v$VERSION never signalled its start-up; restoring $TARGET.old." >> "$LOG"\n'
-        'cp -f "$TARGET.old" "$TARGET" 2>/dev/null\n'
+        'cp -f "$TARGET.old" "$TARGET" 2>/dev/null && rm -f "$TARGET.old"\n'
         'chmod +x "$TARGET" 2>/dev/null\n'
         'rm -f "$MARKER"\n'
         'nohup "$TARGET" >/dev/null 2>&1 &\n'
@@ -4651,9 +4696,11 @@ class AutoTyperApp(_TkBase):
                 "Install update",
                 f"{APP_NAME} {label} has been downloaded.\n\n"
                 "Install it now?\n\n"
-                f"The current version is kept as a backup ({Path(path).name}.old), "
-                "and the app restarts automatically. If the new build does not come "
-                "up, the previous one is restored and starts instead.",
+                "The app closes, replaces itself and opens again. If the new build "
+                "does not come up, the previous one is restored and started instead; "
+                f"the spare copy that makes that possible ({Path(path).name}.old) is "
+                "deleted as soon as the new build reports its window, so nothing "
+                "extra is left next to the program.",
                 icon="question", parent=self,
             ):
                 self._install_downloaded_update(path, version)
@@ -4694,9 +4741,10 @@ class AutoTyperApp(_TkBase):
         messagebox.showinfo(
             "Restarting",
             f"{APP_NAME} will now close and reopen with the new version.\n\n"
-            f"(The swap script is {script.name} in your temp folder; your previous "
-            "build is kept as a .old backup, and if the new one fails to start it is "
-            "the one that comes back.)",
+            f"(The swap script is {script.name} in your temp folder. Your previous "
+            "build is kept only until the new one reports its window: if it never "
+            "comes up, that copy is put back and started, and either way nothing is "
+            "left behind next to the program.)",
             parent=self,
         )
         self._quit_for_restart()
@@ -4842,6 +4890,7 @@ def main(argv=None):
     # did come up. Without this signal it assumes the start failed and puts the
     # previous build back.
     mark_startup_complete()
+    remove_previous_build_backup()
     report_previous_update(app)
     app.mainloop()
     return 0

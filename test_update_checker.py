@@ -125,8 +125,8 @@ class IsNewerVersionTests(unittest.TestCase):
 
 
 class AppVersionTests(unittest.TestCase):
-    def test_shipped_version_is_1_1_3(self):
-        self.assertEqual(at.APP_VERSION, "1.1.3")
+    def test_shipped_version_is_1_1_4(self):
+        self.assertEqual(at.APP_VERSION, "1.1.4")
 
     def test_points_at_this_repository(self):
         self.assertEqual(at.GITHUB_REPO, "jkjklol308-alt/AutoTyper")
@@ -1271,6 +1271,23 @@ class SwapVerificationScriptTests(unittest.TestCase):
         self.assertIn("rolled-back v%VERSION%", give_up)
         self.assertIn('start "" "%TARGET%"', give_up)
 
+    def test_the_backup_is_deleted_once_it_is_not_needed(self):
+        # The .old copy is a working file, not a keepsake: a successful start
+        # deletes it, and so does a swap that never happened.
+        started = self.script.split(":started", 1)[1].split(":notstarted", 1)[0]
+        self.assertIn('del "%TARGET%.old" >nul 2>&1', started)
+        give_up = self.script.split(":giveup", 1)[1]
+        self.assertIn('del "%TARGET%.old" >nul 2>&1', give_up)
+
+    def test_a_rollback_keeps_the_backup_until_the_restore_worked(self):
+        # If the copy back fails the .old file is all that is left of the
+        # previous build, so it may only go once the restore has succeeded.
+        rollback = self.script.split(":notstarted", 1)[1].split(":giveup", 1)[0]
+        self.assertIn('copy /Y "%TARGET%.old" "%TARGET%" >nul 2>&1', rollback)
+        self.assertIn('if not errorlevel 1 del "%TARGET%.old" >nul 2>&1', rollback)
+        self.assertLess(rollback.index('copy /Y "%TARGET%.old"'),
+                        rollback.index('if not errorlevel 1 del "%TARGET%.old"'))
+
     def test_the_onefile_variables_are_deleted_not_just_blanked(self):
         # `set "NAME="` is cmd.exe's documented form for deleting a variable,
         # and the CI job runs these exact lines on a real cmd.exe to prove the
@@ -1339,10 +1356,10 @@ class PosixSwapExecutionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.files.result.read_text(encoding="utf-8").strip(), "ok v9.9.9")
         self.assertTrue(self.files.marker.exists())
-        # The target really is the new build, and the old one is the backup.
+        # The target really is the new build...
         self.assertEqual(self.target.read_text(encoding="utf-8"), new_text)
-        self.assertEqual(Path(str(self.target) + ".old").read_text(encoding="utf-8"),
-                         old_text)
+        # ...and the copy the swap needed on the way is gone again.
+        self.assertFalse(Path(str(self.target) + ".old").exists())
         self.assertIn("started", self.files.log.read_text(encoding="utf-8"))
 
     def test_a_new_build_that_never_signals_is_rolled_back_and_restarted(self):
@@ -1442,6 +1459,44 @@ class DiagnosticsLogTests(unittest.TestCase):
         self.assertEqual(reported, "ok v9.9.9")
         self.assertEqual(messagebox.calls, [])
         self.assertFalse(result_file.exists())
+
+
+class PreviousBuildBackupTests(unittest.TestCase):
+    """The .old copy exists for one swap, not as a second copy of the app."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.exe = self.dir / "AutoTyper.exe"
+        self.exe.write_text("current", encoding="utf-8")
+        self.backup = Path(str(self.exe) + ".old")
+        self.backup.write_text("previous", encoding="utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_deletes_the_leftover_backup_beside_the_running_build(self):
+        with mock.patch.object(at, "running_executable", return_value=self.exe), \
+                mock.patch.object(at, "log_event") as logged:
+            removed = at.remove_previous_build_backup()
+        self.assertEqual(removed, self.backup)
+        self.assertFalse(self.backup.exists())
+        self.assertTrue(self.exe.exists())      # only the spare copy goes
+        self.assertTrue(any(".old" in str(call) for call in logged.call_args_list))
+
+    def test_is_a_no_op_when_there_is_no_backup(self):
+        self.backup.unlink()
+        with mock.patch.object(at, "running_executable", return_value=self.exe):
+            self.assertIsNone(at.remove_previous_build_backup())
+
+    def test_never_raises_when_the_backup_cannot_be_removed(self):
+        with mock.patch.object(at, "running_executable", return_value=self.exe), \
+                mock.patch.object(at.Path, "unlink", side_effect=OSError("locked")):
+            self.assertIsNone(at.remove_previous_build_backup())
+
+    def test_does_nothing_for_a_source_run(self):
+        with mock.patch.object(at, "running_executable", return_value=None):
+            self.assertIsNone(at.remove_previous_build_backup())
 
 
 class SettingsMigrationTests(unittest.TestCase):

@@ -27,8 +27,8 @@ MODULE_PATH = Path(__file__).resolve().parent / "auto_typer.py"
 # Pure model
 # ---------------------------------------------------------------------------
 class VersionTests(unittest.TestCase):
-    def test_version_is_1_1_3(self):
-        self.assertEqual(v2.APP_VERSION, "1.1.3")
+    def test_version_is_1_1_4(self):
+        self.assertEqual(v2.APP_VERSION, "1.1.4")
 
     def test_warm_terracotta_removed_and_order_shifted(self):
         names = list(v2.PALETTE_DEFINITIONS)

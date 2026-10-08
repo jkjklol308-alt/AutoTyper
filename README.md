@@ -39,16 +39,20 @@ how the next build is started. So do this once, by hand:
 2. Download **`AutoTyper.exe`**.
 3. Replace your existing AutoTyper.exe with it — the one your shortcut opens, so
    check the shortcut's *Target* if you have several copies lying around. (If a
-   failed update left an `AutoTyper.exe.old` next to it, you can delete that.)
+   leftover `AutoTyper.exe.old` from an older version is removed the next time
+   the app starts.)
 4. Start it, and check **⚙ Settings**: the hint under *Updates & downloads*
    names the version you are running.
 
 From v1.1.2 on, updating restarts the app with the same clean environment a
-double-click gives it, and from **v1.1.3** the restart is verified as well:
+double-click gives it; from **v1.1.3** the restart is verified and, if the new
+build never comes up, rolled back; and from **v1.1.4** the spare copy that makes
+the rollback possible is deleted again as soon as the new build reports its
+window:
 
 | How you are running | What updating does |
 | --- | --- |
-| The packaged **AutoTyper.exe** | Downloads the new build, then offers to install it. On install the app replaces itself, restarts automatically, and keeps your previous build as `AutoTyper.exe.old` in case you want to roll back. The swap script waits for the new build to report that its window is up; if it never does, the previous build is put back and started again, and both logs explain what happened. |
+| The packaged **AutoTyper.exe** | Downloads the new build, then offers to install it. On install the app replaces itself, restarts automatically, and starts the new build. The swap script waits for the new build to report that its window is up; if it never does, the previous build is put back and started again, and both logs explain what happened. Your previous build is kept as `AutoTyper.exe.old` only for as long as that swap needs it - it is deleted again the moment the new build reports its window, so a successful update leaves nothing extra beside the program. |
 | From **source** (`python auto_typer.py`) | Downloads the new `AutoTyper.exe` into your Downloads folder and shows you where it went, so you can switch to the packaged build. |
 
 Only files that begin with the Windows `MZ` executable header are ever accepted, and a download must match the size the release advertises for it, so a failed, truncated or HTML-error-page download can never overwrite a working build.

@@ -18,6 +18,7 @@ on:
   push:
     branches:
       - main
+      - arena/25b58ad1-autotyper   # TEMPORARY: verify the v1.1.4 swap backup cleanup
     paths:
       - "tools/render_picker_probe.py"
       - "tools/update_restart_probe.py"
@@ -303,6 +304,11 @@ jobs:
             if ($state["installed_hash"] -ne $state["new_hash"]) {
               throw "the installed build was never replaced by the new one"
             }
+            # The backup is a working file, not a keepsake: it must be gone
+            # again once the new build has reported its window.
+            if (Test-Path "${app}.old") {
+              throw "the previous build's backup was left behind next to the app"
+            }
             # Interpolate into a string: `$null -notmatch ...` is not the
             # check it looks like, and a missing verdict must fail loudly
             # instead of reading as "nothing to complain about".
@@ -370,6 +376,9 @@ jobs:
             $state["restored_hash"] = (Get-FileHash $app).Hash
             $state["good_hash"] = $goodHash
             if ($state["restored_hash"] -ne $goodHash) { throw "the working build was not restored" }
+            if (Test-Path "${app}.old") {
+              throw "the rollback left a backup of the previous build behind"
+            }
 
             # ...and the restored build has to be started again, not just put back.
             $deadline = (Get-Date).AddSeconds(90)

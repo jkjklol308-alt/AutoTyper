@@ -86,7 +86,10 @@ def scenario(name: str, work: Path, target_source: Path, new_source: Path,
         "log": read(files.log),
         "script_left_behind": script.exists(),
         "new_build_is_in_place": target.read_bytes() == Path(new_source).read_bytes(),
-        "backup_taken": Path(str(target) + ".old").exists(),
+        # The .old copy exists only for the swap: every path out of the script
+        # deletes it (a successful start, a swap that never happened, or a
+        # rollback that restored the build), so neither outcome may leave one.
+        "leftover_backup": Path(str(target) + ".old").exists(),
     }
 
 
@@ -119,6 +122,9 @@ def main(argv=None):
                         f"{rolled_back['verdict']!r}")
     if "never signalled" not in rolled_back["log"]:
         failures.append("the rollback was not explained in the swap log")
+    for name, state in report.items():
+        if state["leftover_backup"]:
+            failures.append(f"the {name} case left a backup of the previous build behind")
     if failures:
         print("FAILURES: " + "; ".join(failures), file=sys.stderr)
         return 1
