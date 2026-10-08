@@ -232,8 +232,15 @@ jobs:
             if ($state["report"] -notmatch "v9\.9\.9 started from") {
               throw "the wrong build answered: $($state["report"])"
             }
-            if ($state["report"] -notmatch "\(own\)") {
-              throw "the new build is not using its own extraction folder: $($state["report"])"
+            # The new build must be unpacking its own files. It reports the
+            # state it was *handed* (captured before its own scrub), so both
+            # "fresh" and "own extraction dir" are healthy; only a build
+            # pointed at another process's deleted folder is not.
+            if ($state["report"] -notmatch "meipass=[A-Za-z]:\\") {
+              throw "the new build did not report a real extraction folder: $($state["report"])"
+            }
+            if ($state["report"] -match "NOT this build's extraction dir") {
+              throw "the new build inherited someone else's extraction folder: $($state["report"])"
             }
             Write-Host "::notice::AUTOTYPER-E2E-UPDATE:$(($state | ConvertTo-Json -Compress))"
           } catch {

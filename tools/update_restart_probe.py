@@ -41,25 +41,21 @@ def report(line: str) -> None:
 
 
 def describe_environment() -> str:
-    """What this build is, and whether it is using its *own* extraction folder.
+    """What this build is, and which extraction folder it was handed.
 
-    A onefile child always inherits `_PYI_*` variables — they are how the
-    bootloader tells it where its files are — so "no variables at all" is not
-    the health check. The check is that
-    `_PYI_APPLICATION_HOME_DIR` names *this* build's extraction directory:
-    anything else means it is looking at another process's folder, which is the
-    state that dies with "Error loading Python DLL".
+    The verdict comes from `auto_typer.describe_onefile_home()`, which reads the
+    variables captured *before* `main` scrubs them: a build started from a
+    scrubbed environment reports "fresh", a onefile child reports its own
+    extraction dir, and a build pointed at another process's folder — the state
+    that dies with "Error loading Python DLL" — is named as such.
     """
-    home = at.os.environ.get("_PYI_APPLICATION_HOME_DIR") or ""
-    meipass = getattr(at.sys, "_MEIPASS", "") or ""
-    own = bool(home) and bool(meipass) and (at.os.path.normcase(home)
-                                            == at.os.path.normcase(meipass))
     return (f"v{at.APP_VERSION} started from {at.sys.executable} "
-            f"(frozen={at.is_frozen()}, onefile-home={home or 'unset'} "
-            f"({'own' if own else 'NOT own'}), meipass={meipass or 'unset'})")
+            f"(frozen={at.is_frozen()}, {at.describe_onefile_home()}, "
+            f"meipass={getattr(at.sys, '_MEIPASS', '') or 'unset'})")
 
 
 def main(argv):
+    at.capture_startup_runtime_environment()
     at.scrub_pyinstaller_runtime_environment()
     if argv and argv[0] == "--self-update":
         target, new_exe, version = Path(argv[1]), Path(argv[2]), argv[3]

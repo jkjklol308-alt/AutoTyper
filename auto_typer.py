@@ -1897,6 +1897,63 @@ def restart_environment(env: Optional[dict] = None) -> Dict[str, str]:
     return clean
 
 
+#: The PyInstaller onefile variables this process was *started* with, captured
+#: before `scrub_pyinstaller_runtime_environment()` deletes them. They are the
+#: only evidence of which extraction folder this build was handed: once they
+#: are gone, "nothing was inherited" and "we deleted it ourselves" look the
+#: same in the environment. `None` means nothing was captured.
+STARTUP_RUNTIME_ENV: Optional[Dict[str, str]] = None
+
+
+def capture_startup_runtime_environment(env=None) -> Dict[str, str]:
+    """Remember the PyInstaller variables in ``env`` (default: ours).
+
+    Must run before the scrub. `log_startup_environment()` reports from this
+    record, so the log says what the *bootloader* handed us rather than what is
+    left after we cleaned up.
+    """
+    global STARTUP_RUNTIME_ENV
+    target = os.environ if env is None else env
+    STARTUP_RUNTIME_ENV = {name: value for name, value in target.items()
+                           if name.upper() in _PYINSTALLER_RUNTIME_ENV_VARS_UPPER}
+    return STARTUP_RUNTIME_ENV
+
+
+def startup_runtime_env() -> Dict[str, str]:
+    """What this process started with, or the live environment if uncaptured."""
+    if STARTUP_RUNTIME_ENV is not None:
+        return dict(STARTUP_RUNTIME_ENV)
+    return {name: value for name, value in os.environ.items()
+            if name.upper() in _PYINSTALLER_RUNTIME_ENV_VARS_UPPER}
+
+
+def describe_onefile_home() -> str:
+    """Where this build's unpacked files came from — the "Error loading Python
+    DLL" question — as one clause for the log and the update probes.
+
+    Three states, and only the last one is broken:
+
+    * **no `_PYI_APPLICATION_HOME_DIR` at start**: this process unpacked its own
+      files; `_MEIPASS` (a property of this process, not an environment
+      variable) is therefore this build's own folder. This is the state of a
+      build started from a scrubbed environment — the normal post-update case.
+    * **a folder equal to `_MEIPASS`**: a onefile child handed its parent's
+      extraction directory, which *is* this build's folder.
+    * **anything else**: somebody else's folder. That is the reported failure —
+      the folder was deleted when the build that owned it exited, so the Python
+      DLL is gone by the time this process looks for it.
+    """
+    home = startup_runtime_env().get("_PYI_APPLICATION_HOME_DIR", "")
+    meipass = getattr(sys, "_MEIPASS", None) or ""
+    if not home:
+        if meipass:
+            return f"onefile-home=unset (fresh: this build unpacked its own files into {meipass})"
+        return "onefile-home=unset (nothing inherited)"
+    if meipass and os.path.normcase(home) == os.path.normcase(meipass):
+        return f"onefile-home={home} (own extraction dir)"
+    return f"onefile-home={home} (NOT this build's extraction dir {meipass or 'unknown'})"
+
+
 def scrub_pyinstaller_runtime_environment(env=None) -> List[str]:
     """Delete this process's PyInstaller onefile state from ``env``.
 
@@ -1996,23 +2053,16 @@ def log_event(message: str, *, path: Optional[Path] = None) -> None:
 
 
 def log_startup_environment() -> None:
-    """Record what this build is and what it inherited.
+    """Record what this build is and what the bootloader handed it.
 
-    In a onefile build the variable that matters is
-    `_PYI_APPLICATION_HOME_DIR`: a healthy start sees its *own* extraction
-    folder there (the bootloader sets it for the process it launches), while a
-    build that inherited the previous process's value is the "Error loading
-    Python DLL" case — it is looking for a folder that no longer exists.
+    Reports the variables captured *before* the scrub (see
+    `capture_startup_runtime_environment`), so `onefile-env` lists what this
+    process inherited rather than what is left after we cleaned up — the
+    distinction the "Error loading Python DLL" failure turns on.
     """
     meipass = getattr(sys, "_MEIPASS", None) or ""
-    inherited = sorted(name for name in os.environ
-                       if name.upper() in _PYINSTALLER_RUNTIME_ENV_VARS_UPPER)
-    if is_frozen():
-        home = os.environ.get("_PYI_APPLICATION_HOME_DIR") or ""
-        own = bool(home) and bool(meipass) and os.path.normcase(home) == os.path.normcase(meipass)
-        where = f"onefile-home={home or 'unset'} ({'own extraction dir' if own else 'NOT own'})"
-    else:
-        where = "onefile-home=n/a (source run)"
+    inherited = sorted(startup_runtime_env())
+    where = describe_onefile_home() if is_frozen() else "onefile-home=n/a (source run)"
     log_event(
         "start: "
         f"frozen={is_frozen()} sys.executable={getattr(sys, 'executable', '')!r} "
@@ -2528,31 +2578,21 @@ def launch_swap_script(script_path: Path, *, windows: bool = None) -> None:
 
     The script is started with a scrubbed environment (`restart_environment`),
     so everything it starts later — including the new build — is launched as
-    if the user had double-clicked it. Its output is appended to the swap log:
-    a batch script that dies half way through (a syntax error, a path it
-    cannot write) used to leave no trace at all.
+    if the user had double-clicked it. Nothing is held open here on purpose:
+    the script writes its own progress to the swap log, and a handle this
+    process kept would make that write fail.
     """
     on_windows = (os.name == "nt") if windows is None else windows
     env = restart_environment()
-    handle = None
-    try:
-        log = swap_log_path()
-        log.parent.mkdir(parents=True, exist_ok=True)
-        handle = log.open("a", encoding="utf-8", errors="replace")
-    except OSError:
-        handle = None
-    output = {"stdout": handle, "stderr": subprocess.STDOUT if handle is not None else None}
     if on_windows:
         creationflags = 0
         for flag in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP"):
             creationflags |= getattr(subprocess, flag, 0)
-        # The handle is inherited by cmd.exe (and by everything the script
-        # starts), so this end may close it once the child has its own copy.
         subprocess.Popen(["cmd", "/c", str(script_path)], close_fds=True,
-                         env=env, creationflags=creationflags, **output)
+                         env=env, creationflags=creationflags)
     else:
         subprocess.Popen(["/bin/sh", str(script_path)], start_new_session=True,
-                         env=env, **output)
+                         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def install_update_and_restart(new_exe, target_exe=None, *, windows: bool = None,
@@ -2593,12 +2633,13 @@ def install_update_and_restart(new_exe, target_exe=None, *, windows: bool = None
     script_path = stage / f"{APP_NAME}-update{suffix}"
     process_id = int(pid if pid is not None else os.getpid())
     files = handoff if handoff is not None else update_handoff()
-    script_path.write_text(
-        build_swap_script(new_exe, target_exe, process_id, windows=on_windows,
-                          version=version, handoff=files,
-                          watch_seconds=watch_seconds),
-        encoding="utf-8",
-    )
+    # `newline=""` matters: the script is written with CRLF line endings on
+    # purpose, and text mode would translate the \n inside them into CRLF
+    # again, leaving cmd.exe a stray carriage return on every line.
+    with script_path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(build_swap_script(new_exe, target_exe, process_id, windows=on_windows,
+                                       version=version, handoff=files,
+                                       watch_seconds=watch_seconds))
     log_event(f"update: swap script written to {script_path} "
               f"(waits for {files.marker}); starting it detached")
     # A verdict from an older update must not be mistaken for this one's.
@@ -4662,6 +4703,7 @@ def main(argv=None):
     # manager, a helper such as pbpaste) then inherits a clean environment,
     # and a restarted build unpacks its own files. See the notes on
     # `restart_environment` at the top of section 10.
+    capture_startup_runtime_environment()
     scrub_pyinstaller_runtime_environment()
     log_startup_environment()
 

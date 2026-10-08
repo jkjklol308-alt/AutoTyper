@@ -464,6 +464,59 @@ class RestartEnvironmentTests(unittest.TestCase):
     def test_scrub_is_happy_when_there_is_nothing_to_remove(self):
         self.assertEqual(at.scrub_pyinstaller_runtime_environment({}), [])
 
+    def test_the_startup_environment_is_captured_before_the_scrub(self):
+        previous = at.STARTUP_RUNTIME_ENV
+        try:
+            dirty = {"PATH": "/usr/bin", "_PYI_APPLICATION_HOME_DIR": "/tmp/_MEI1"}
+            at.capture_startup_runtime_environment(dirty)
+            self.assertEqual(at.startup_runtime_env(), {"_PYI_APPLICATION_HOME_DIR": "/tmp/_MEI1"})
+            at.scrub_pyinstaller_runtime_environment(dirty)
+            # The scrub of the live process cannot rewrite what the log will say.
+            self.assertEqual(at.startup_runtime_env(), {"_PYI_APPLICATION_HOME_DIR": "/tmp/_MEI1"})
+        finally:
+            at.STARTUP_RUNTIME_ENV = previous
+
+    def test_an_uncaptured_environment_is_read_live(self):
+        previous = at.STARTUP_RUNTIME_ENV
+        try:
+            at.STARTUP_RUNTIME_ENV = None
+            with mock.patch.dict(os.environ, {"_MEIPASS2": "x", "PATH": "/usr/bin"}, clear=False):
+                self.assertEqual(at.startup_runtime_env(), {"_MEIPASS2": "x"})
+        finally:
+            at.STARTUP_RUNTIME_ENV = previous
+
+    def test_a_build_that_unpacked_its_own_files_is_reported_as_fresh(self):
+        previous = at.STARTUP_RUNTIME_ENV
+        try:
+            at.STARTUP_RUNTIME_ENV = {}
+            with mock.patch.object(at.sys, "_MEIPASS", r"C:\Temp\_MEI123", create=True):
+                text = at.describe_onefile_home()
+            self.assertIn("onefile-home=unset", text)
+            self.assertIn("fresh", text)
+            self.assertIn(r"C:\Temp\_MEI123", text)
+        finally:
+            at.STARTUP_RUNTIME_ENV = previous
+
+    def test_a_build_using_its_own_extraction_folder_says_so(self):
+        previous = at.STARTUP_RUNTIME_ENV
+        try:
+            at.STARTUP_RUNTIME_ENV = {"_PYI_APPLICATION_HOME_DIR": "/tmp/_MEI7"}
+            with mock.patch.object(at.sys, "_MEIPASS", "/tmp/_MEI7", create=True):
+                self.assertIn("(own extraction dir)", at.describe_onefile_home())
+        finally:
+            at.STARTUP_RUNTIME_ENV = previous
+
+    def test_a_build_pointed_at_another_processs_folder_is_flagged(self):
+        previous = at.STARTUP_RUNTIME_ENV
+        try:
+            at.STARTUP_RUNTIME_ENV = {"_PYI_APPLICATION_HOME_DIR": "/tmp/_MEIdead"}
+            with mock.patch.object(at.sys, "_MEIPASS", "/tmp/_MEInew", create=True):
+                text = at.describe_onefile_home()
+            self.assertIn("NOT this build's extraction dir", text)
+            self.assertIn("/tmp/_MEIdead", text)
+        finally:
+            at.STARTUP_RUNTIME_ENV = previous
+
     def test_scrub_on_the_real_environment_leaves_it_usable(self):
         with mock.patch.dict(os.environ, {"_PYI_PARENT_PROCESS_LEVEL": "0"}, clear=False):
             at.scrub_pyinstaller_runtime_environment()
@@ -641,6 +694,22 @@ class InstallUpdateTests(unittest.TestCase):
         self.assertEqual(script.suffix, ".bat")
         self.assertIn(str(self.new_exe), script.read_text(encoding="utf-8"))
         launch.assert_called_once()
+
+    def test_the_script_is_written_with_clean_crlf_line_endings(self):
+        # Text mode on Windows would turn every "\r\n" into "\r\r\n" and
+        # hand cmd.exe a stray carriage return on every single line.
+        for windows in (True, False):
+            with mock.patch.object(at, "launch_swap_script"):
+                script = at.install_update_and_restart(self.new_exe, self.target,
+                                                       windows=windows,
+                                                       temp_dir=self.dir / f"stage-{windows}",
+                                                       pid=1234)
+            raw = script.read_bytes()
+            self.assertNotIn(b"\r\r\n", raw)
+            if windows:
+                self.assertIn(b"@echo off\r\n", raw)
+            else:
+                self.assertTrue(raw.startswith(b"#!/bin/sh\n"))
 
     def test_posix_script_is_executable(self):
         with mock.patch.object(at, "launch_swap_script"):     # never spawn a real swapper here
@@ -1282,9 +1351,19 @@ class DiagnosticsLogTests(unittest.TestCase):
             at.log_event("this must not raise", path=self.base / "nope" / "x.log")
 
     def test_startup_environment_is_recorded(self):
-        with mock.patch.object(at, "log_file_path", return_value=self.base / "AutoTyper.log"), \
-                mock.patch.dict(os.environ, {"_PYI_ARCHIVE_FILE": "stale.exe"}, clear=False):
-            at.log_startup_environment()
+        # In this order, the way `main` does it: the capture must happen before
+        # the scrub, or the log could only report the clean environment the app
+        # itself created and never what the bootloader handed it.
+        previous = at.STARTUP_RUNTIME_ENV
+        try:
+            with mock.patch.object(at, "log_file_path",
+                                   return_value=self.base / "AutoTyper.log"), \
+                    mock.patch.dict(os.environ, {"_PYI_ARCHIVE_FILE": "stale.exe"}, clear=False):
+                at.capture_startup_runtime_environment()
+                at.scrub_pyinstaller_runtime_environment()
+                at.log_startup_environment()
+        finally:
+            at.STARTUP_RUNTIME_ENV = previous
         text = (self.base / "AutoTyper.log").read_text(encoding="utf-8")
         self.assertIn("onefile-env=['_PYI_ARCHIVE_FILE']", text)
         self.assertIn("frozen=", text)
