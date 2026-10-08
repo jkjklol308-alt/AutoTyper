@@ -76,10 +76,10 @@ def main(argv):
                                                watch_seconds=watch)
         report(f"staged {staged.name} as v{version}; swap script: {script.name}")
         return 0
-    # What the swap script starts: the app's start-up handshake, and a report
-    # of what this build inherited.
-    at.mark_startup_complete()
+    # What the swap script starts: report what this build inherited *first*, so
+    # the record is on disk before the marker tells the script it came up.
     report(describe_environment())
+    at.mark_startup_complete()
     return 0
 
 

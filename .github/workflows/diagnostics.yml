@@ -176,13 +176,16 @@ jobs:
             $state["probe_exit"] = $LASTEXITCODE
             if ($LASTEXITCODE -ne 0) { throw "the probe could not stage the update" }
 
-            $deadline = (Get-Date).AddSeconds(180)
-            while ((Get-Date) -lt $deadline -and (Get-FileHash $app).Hash -ne (Get-FileHash $new).Hash) {
-              Start-Sleep -Seconds 1
-            }
+            # The copy lands first; the verdict is written only after the
+            # script has watched the new build come up (or give up on it), so
+            # wait for the verdict rather than for the file to change.
+            $verdictFile = Join-Path $data "update-result.txt"
+            $deadline = (Get-Date).AddSeconds(240)
+            while ((Get-Date) -lt $deadline -and -not (Test-Path $verdictFile)) { Start-Sleep -Seconds 1 }
             $state["installed_hash"] = (Get-FileHash $app).Hash
             $state["new_hash"] = (Get-FileHash $new).Hash
-            $state["verdict"] = (Get-Content (Join-Path $data "update-result.txt") -Raw -ErrorAction SilentlyContinue)
+            $state["verdict"] = (Get-Content $verdictFile -Raw -ErrorAction SilentlyContinue)
+            $state["marker"] = (Get-Content (Join-Path $data "startup-ok") -Raw -ErrorAction SilentlyContinue)
             $state["report"] = (Get-Content $report -Raw -ErrorAction SilentlyContinue)
             $state["app_log"] = (Get-Content (Join-Path $data "AutoTyper.log") -Raw -ErrorAction SilentlyContinue)
             $state["swap_log"] = (Get-Content (Join-Path $data "AutoTyper-update.log") -Raw -ErrorAction SilentlyContinue)
