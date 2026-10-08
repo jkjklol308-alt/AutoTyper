@@ -2578,9 +2578,14 @@ def launch_swap_script(script_path: Path, *, windows: bool = None) -> None:
 
     The script is started with a scrubbed environment (`restart_environment`),
     so everything it starts later — including the new build — is launched as
-    if the user had double-clicked it. Nothing is held open here on purpose:
-    the script writes its own progress to the swap log, and a handle this
-    process kept would make that write fail.
+    if the user had double-clicked it.
+
+    No file this process owns is handed to the script: the script writes its
+    own progress to the swap log, and a handle held here would make that write
+    fail. Its three standard handles are pointed at the null device rather than
+    left unset — a detached ``cmd.exe`` with no valid handles is not something
+    to rely on, and it guarantees nothing of ours can be written to from the
+    process that outlives us.
     """
     on_windows = (os.name == "nt") if windows is None else windows
     env = restart_environment()
@@ -2588,11 +2593,16 @@ def launch_swap_script(script_path: Path, *, windows: bool = None) -> None:
         creationflags = 0
         for flag in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP"):
             creationflags |= getattr(subprocess, flag, 0)
-        subprocess.Popen(["cmd", "/c", str(script_path)], close_fds=True,
-                         env=env, creationflags=creationflags)
+        process = subprocess.Popen(
+            ["cmd", "/c", str(script_path)], close_fds=True, env=env,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, creationflags=creationflags)
     else:
-        subprocess.Popen(["/bin/sh", str(script_path)], start_new_session=True,
-                         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        process = subprocess.Popen(
+            ["/bin/sh", str(script_path)], start_new_session=True, env=env,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL)
+    log_event(f"update: the swap script is running as pid {process.pid}")
 
 
 def install_update_and_restart(new_exe, target_exe=None, *, windows: bool = None,

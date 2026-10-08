@@ -191,6 +191,67 @@ jobs:
           }
           Write-Host "::notice::AUTOTYPER-SWAP-SCRIPT-OK:$summary"
 
+      - name: Watch what becomes of the detached swap script
+        shell: pwsh
+        run: |
+          # The app starts the swap script detached and quits, and a script
+          # that dies instead of finishing leaves nothing behind but a missing
+          # verdict. This step watches it from the outside - is cmd.exe still
+          # alive, is the swap log still growing, does a verdict appear - so a
+          # report of "the update did nothing" comes with the script's fate
+          # rather than a guess. It runs before the two end-to-end steps and
+          # publishes its trace through the check-run API like they do.
+          $root = Join-Path $env:TEMP "detach-watch"
+          Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
+          $app = Join-Path $root "app\AutoTyper.exe"
+          New-Item -ItemType Directory -Force -Path (Split-Path $app) | Out-Null
+          Copy-Item "e2e/dist/OldBuild.exe" $app
+          $new = (Resolve-Path "e2e/dist/NewBuild.exe").Path
+          $data = Join-Path $env:LOCALAPPDATA "AutoTyper"
+          $log = Join-Path $data "AutoTyper-update.log"
+          $result = Join-Path $data "update-result.txt"
+          Remove-Item $result -ErrorAction SilentlyContinue
+
+          $state = [ordered]@{ trace = @() }
+          try {
+            & $app --self-update $app $new 9.9.9 --watch 20
+            $state["probe_exit"] = $LASTEXITCODE
+            if ($LASTEXITCODE -ne 0) { throw "the probe could not stage the update" }
+
+            $seen = ""
+            $deadline = (Get-Date).AddSeconds(120)
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            while ((Get-Date) -lt $deadline) {
+              $scripts = @(Get-CimInstance Win32_Process -Filter "Name='cmd.exe'" `
+                           -ErrorAction SilentlyContinue |
+                           Where-Object { $_.CommandLine -like "*AutoTyper-update.bat*" } |
+                           Select-Object -ExpandProperty ProcessId)
+              $bytes = (Get-Item $log -ErrorAction SilentlyContinue).Length
+              $text = $null
+              if (Test-Path $result) { $text = Get-Content $result -Raw -ErrorAction SilentlyContinue }
+              $fingerprint = "$scripts|$bytes|$text"
+              if ($fingerprint -ne $seen) {
+                $seen = $fingerprint
+                $state["trace"] += [ordered]@{ t = [int]$sw.Elapsed.TotalSeconds
+                                               script_pids = $scripts
+                                               log_bytes = $bytes
+                                               verdict = "$text" }
+              }
+              if ($text) { $state["verdict"] = "$text"; break }
+              Start-Sleep -Seconds 2
+            }
+            $state["log_tail"] = ((Get-Content $log -ErrorAction SilentlyContinue |
+                                   Select-Object -Last 6) -join " | ")
+            Write-Host "::notice::AUTOTYPER-DETACH-WATCH:$(($state | ConvertTo-Json -Compress -Depth 5))"
+            if ("$($state["verdict"])" -notmatch "ok v9\.9\.9") {
+              throw "the detached swap script never left a verdict: '$($state["verdict"])'"
+            }
+          } catch {
+            $state["error"] = "$_"
+            Write-Host "::error::AUTOTYPER-DETACH-WATCH-FAIL:$(($state | ConvertTo-Json -Compress -Depth 5))"
+            throw
+          }
+
       - name: A real update replaces the build, and the new build comes up
         shell: pwsh
         run: |
@@ -209,14 +270,21 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "the probe could not stage the update" }
 
             # The copy lands first; the verdict is written only after the
-            # script has watched the new build come up (or give up on it), so
-            # wait for the verdict rather than for the file to change.
+            # script has watched the new build come up (or given up on it), so
+            # wait for the verdict rather than for the file to change - and for
+            # it to have content, because an empty file is not a verdict.
             $verdictFile = Join-Path $data "update-result.txt"
+            $state["verdict"] = $null
             $deadline = (Get-Date).AddSeconds(240)
-            while ((Get-Date) -lt $deadline -and -not (Test-Path $verdictFile)) { Start-Sleep -Seconds 1 }
+            while ((Get-Date) -lt $deadline) {
+              if (Test-Path $verdictFile) {
+                $text = Get-Content $verdictFile -Raw -ErrorAction SilentlyContinue
+                if ($text) { $state["verdict"] = $text; break }
+              }
+              Start-Sleep -Seconds 1
+            }
             $state["installed_hash"] = (Get-FileHash $app).Hash
             $state["new_hash"] = (Get-FileHash $new).Hash
-            $state["verdict"] = (Get-Content $verdictFile -Raw -ErrorAction SilentlyContinue)
             $state["marker"] = (Get-Content (Join-Path $data "startup-ok") -Raw -ErrorAction SilentlyContinue)
             $state["report"] = (Get-Content $report -Raw -ErrorAction SilentlyContinue)
             $state["app_log"] = (Get-Content (Join-Path $data "AutoTyper.log") -Raw -ErrorAction SilentlyContinue)
@@ -226,8 +294,14 @@ jobs:
             if ($state["installed_hash"] -ne $state["new_hash"]) {
               throw "the installed build was never replaced by the new one"
             }
-            if ($state["verdict"] -notmatch "ok v9\.9\.9") {
-              throw "the swap script did not report a started build: $($state["verdict"])"
+            # Interpolate into a string: `$null -notmatch ...` is not the
+            # check it looks like, and a missing verdict must fail loudly
+            # instead of reading as "nothing to complain about".
+            if ("$($state["verdict"])" -notmatch "ok v9\.9\.9") {
+              throw "the swap script did not report a started build: '$($state["verdict"])'"
+            }
+            if ("$($state["marker"])" -notmatch "v9\.9\.9") {
+              throw "the new build never signalled its window: '$($state["marker"])'"
             }
             if ($state["report"] -notmatch "v9\.9\.9 started from") {
               throw "the wrong build answered: $($state["report"])"
@@ -272,11 +346,17 @@ jobs:
             $state["probe_exit"] = $LASTEXITCODE
             if ($LASTEXITCODE -ne 0) { throw "the probe could not stage the rollback case" }
 
+            $state["verdict"] = $null
             $deadline = (Get-Date).AddSeconds(180)
-            while ((Get-Date) -lt $deadline -and -not (Test-Path $result)) { Start-Sleep -Seconds 1 }
-            $state["verdict"] = (Get-Content $result -Raw -ErrorAction SilentlyContinue)
-            if ($state["verdict"] -notmatch "rolled-back v0\.0\.0") {
-              throw "expected a rollback, got: $($state["verdict"])"
+            while ((Get-Date) -lt $deadline) {
+              if (Test-Path $result) {
+                $text = Get-Content $result -Raw -ErrorAction SilentlyContinue
+                if ($text) { $state["verdict"] = $text; break }
+              }
+              Start-Sleep -Seconds 1
+            }
+            if ("$($state["verdict"])" -notmatch "rolled-back v0\.0\.0") {
+              throw "expected a rollback, got: '$($state["verdict"])'"
             }
             $state["restored_hash"] = (Get-FileHash $app).Hash
             $state["good_hash"] = $goodHash

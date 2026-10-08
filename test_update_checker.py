@@ -741,6 +741,19 @@ class InstallUpdateTests(unittest.TestCase):
         _, kwargs = popen.call_args
         self.assertTrue(kwargs.get("start_new_session"))
 
+    def test_launch_never_hands_our_files_to_the_swap_script(self):
+        # Not a pipe and not the swap log itself: the script writes that log,
+        # and any handle held here makes its own write fail ("The process
+        # cannot access the file because it is being used by another
+        # process."). A detached cmd also needs *valid* handles rather than
+        # none, so all three point at the null device.
+        for windows, name in ((True, "s.bat"), (False, "s.sh")):
+            with mock.patch.object(at.subprocess, "Popen") as popen:
+                at.launch_swap_script(self.dir / name, windows=windows)
+            _, kwargs = popen.call_args
+            for handle in ("stdin", "stdout", "stderr"):
+                self.assertIs(kwargs.get(handle), at.subprocess.DEVNULL, handle)
+
     def test_launch_hands_the_script_a_scrubbed_environment(self):
         """The swap script must not describe *our* unpacked files: it starts
         the next build, and inheriting them breaks that build's start-up."""
