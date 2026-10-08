@@ -159,6 +159,24 @@ jobs:
       # real machine. They report everything they know through the check-run
       # API (annotations and the step summary), because the job logs of a
       # Windows runner are not always reachable from where this is reviewed.
+      - name: Run the generated swap script itself (real cmd.exe, both outcomes)
+        shell: pwsh
+        run: |
+          # A batch file that dies half way through is silent when the app
+          # starts it detached, so run it here in the foreground - with its
+          # output captured - for both a build that signals its start-up and
+          # one that never does.
+          $json = python tools/swap_script_probe.py --work "$env:TEMP\swap-ci" `
+                    --good "e2e/dist/NewBuild.exe" --broken "e2e/dist/BrokenBuild.exe" `
+                    --version 9.9.9 --watch 20 2>&1 | Out-String
+          Write-Host $json
+          Write-Host "::notice::AUTOTYPER-SWAP-SCRIPT-RUN:$(($json -replace "`r?`n", " ").Substring(0, [Math]::Min(3500, $json.Length)))"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::AUTOTYPER-SWAP-SCRIPT-FAIL:$(($json -replace "`r?`n", " ").Substring(0, [Math]::Min(3500, $json.Length)))"
+            $json | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            throw "the generated swap script did not behave"
+          }
+
       - name: A real update replaces the build, and the new build comes up
         shell: pwsh
         run: |
@@ -189,6 +207,7 @@ jobs:
             $state["report"] = (Get-Content $report -Raw -ErrorAction SilentlyContinue)
             $state["app_log"] = (Get-Content (Join-Path $data "AutoTyper.log") -Raw -ErrorAction SilentlyContinue)
             $state["swap_log"] = (Get-Content (Join-Path $data "AutoTyper-update.log") -Raw -ErrorAction SilentlyContinue)
+            $state["bat"] = (Get-Content (Join-Path $env:TEMP "AutoTyper-update.bat") -Raw -ErrorAction SilentlyContinue)
 
             if ($state["installed_hash"] -ne $state["new_hash"]) {
               throw "the installed build was never replaced by the new one"
@@ -251,6 +270,7 @@ jobs:
             }
             $state["report"] = (Get-Content $report -Raw -ErrorAction SilentlyContinue)
             $state["swap_log"] = (Get-Content (Join-Path $data "AutoTyper-update.log") -Raw -ErrorAction SilentlyContinue)
+            $state["bat"] = (Get-Content (Join-Path $env:TEMP "AutoTyper-update.bat") -Raw -ErrorAction SilentlyContinue)
             $lines = $state["report"].Split("`n")
             if ($lines.Count -le $before) { throw "the restored build was never started" }
             Write-Host "::notice::AUTOTYPER-E2E-ROLLBACK:$(($state | ConvertTo-Json -Compress))"

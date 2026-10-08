@@ -2377,6 +2377,7 @@ def build_windows_swap_script(new_exe, target_exe, wait_seconds: int = 120,
         'if not exist "%DIR%" mkdir "%DIR%" >nul 2>&1\r\n'
         "set /a COUNT=0\r\n"
         "set /a GONE=0\r\n"
+        '>>"%LOG%" echo [%DATE% %TIME%] v%VERSION%: replacing "%TARGET%" (waiting for it to unlock).\r\n'
         f"{backup_lines}"
         ":waitloop\r\n"
         'copy /Y "%NEW%" "%TARGET%" >nul 2>&1\r\n'
@@ -2388,6 +2389,7 @@ def build_windows_swap_script(new_exe, target_exe, wait_seconds: int = 120,
         ":installed\r\n"
         'del "%NEW%" >nul 2>&1\r\n'
         'del "%MARKER%" >nul 2>&1\r\n'
+        '>>"%LOG%" echo [%DATE% %TIME%] v%VERSION%: copied into place; starting it and waiting for its start-up signal.\r\n'
         'start "" "%TARGET%"\r\n'
         "set /a WAITS=0\r\n"
         ":watch\r\n"
@@ -2399,6 +2401,9 @@ def build_windows_swap_script(new_exe, target_exe, wait_seconds: int = 120,
         ":watching\r\n"
         "set /a WAITS+=1\r\n"
         "if %WAITS% GEQ %WATCH% goto notstarted\r\n"
+        # Log the first few waits: if the script ever dies or hangs in here,
+        # the log shows how far it got instead of ending at "starting it".
+        'if %WAITS% LEQ 3 >>"%LOG%" echo [%DATE% %TIME%] waiting for the start-up signal (%WAITS% of %WATCH%).\r\n'
         # A build that died at once (instead of waiting for a click on its
         # error box) should not keep the user waiting a minute for the
         # rollback, so watch for the process disappearing as well.
@@ -2523,19 +2528,31 @@ def launch_swap_script(script_path: Path, *, windows: bool = None) -> None:
 
     The script is started with a scrubbed environment (`restart_environment`),
     so everything it starts later — including the new build — is launched as
-    if the user had double-clicked it.
+    if the user had double-clicked it. Its output is appended to the swap log:
+    a batch script that dies half way through (a syntax error, a path it
+    cannot write) used to leave no trace at all.
     """
     on_windows = (os.name == "nt") if windows is None else windows
     env = restart_environment()
+    handle = None
+    try:
+        log = swap_log_path()
+        log.parent.mkdir(parents=True, exist_ok=True)
+        handle = log.open("a", encoding="utf-8", errors="replace")
+    except OSError:
+        handle = None
+    output = {"stdout": handle, "stderr": subprocess.STDOUT if handle is not None else None}
     if on_windows:
         creationflags = 0
         for flag in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP"):
             creationflags |= getattr(subprocess, flag, 0)
+        # The handle is inherited by cmd.exe (and by everything the script
+        # starts), so this end may close it once the child has its own copy.
         subprocess.Popen(["cmd", "/c", str(script_path)], close_fds=True,
-                         env=env, creationflags=creationflags)
+                         env=env, creationflags=creationflags, **output)
     else:
         subprocess.Popen(["/bin/sh", str(script_path)], start_new_session=True,
-                         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                         env=env, **output)
 
 
 def install_update_and_restart(new_exe, target_exe=None, *, windows: bool = None,
