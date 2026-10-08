@@ -20,6 +20,8 @@ on:
       - main
     paths:
       - "tools/render_picker_probe.py"
+      - "tools/update_restart_probe.py"
+      - "tools/update_restart_probe_broken.py"
       - "auto_typer.py"
       - "AutoTyper.spec"
       - ".github/workflows/diagnostics.yml"
@@ -82,6 +84,130 @@ jobs:
         # errors in a message box, which would hang the runner instead of
         # failing. The onefile environment handling under test is identical.
         run: pyinstaller --onefile --console --noconfirm --name AutoTyperProbe --distpath dist-probe auto_typer.py
+
+      - name: Prove that clearing a variable needs cmd.exe's closing quote
+        shell: python
+        run: |
+          # The swap script clears PyInstaller's onefile variables with
+          # `set "NAME="`. Without the closing quote that line only creates a
+          # variable whose *name* starts with a quote, and the real variable
+          # (this process's unpacked-file paths) survives into the build being
+          # started — the bug behind "Error loading Python DLL" after an update.
+          import pathlib
+          import subprocess
+          import sys
+
+          bat = pathlib.Path("unset-quoting.bat")
+          bat.write_text(
+              '@echo off\r\n'
+              'set "FOO=bar"\r\n'
+              'set "FOO=\r\n'          # the broken form: no closing quote
+              'echo broken:%FOO%\r\n'
+              'set "BAR=baz"\r\n'
+              'set "BAR="\r\n'          # the correct form
+              'echo fixed:[%BAR%]\r\n',
+              encoding="utf-8",
+          )
+          out = subprocess.run(["cmd", "/c", str(bat)], capture_output=True,
+                               text=True).stdout
+          print(out)
+          if "broken:bar" not in out:
+              sys.exit("cmd.exe cleared the variable without a closing quote - the "
+                       "regression test needs revisiting")
+          if "fixed:[]" not in out:
+              sys.exit("set \"NAME=\" did not clear the variable")
+
+      - name: Build the ends of a real self-update (old, new and broken builds)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p e2e/old/tools e2e/new/tools
+          for tree in old new; do
+            cp auto_typer.py "e2e/$tree/auto_typer.py"
+            cp tools/update_restart_probe.py "e2e/$tree/tools/update_restart_probe.py"
+          done
+          # The "new" build is a genuinely different build: bump its version.
+          python - "$PWD" <<'PY'
+          import pathlib, re, sys
+          root = pathlib.Path(sys.argv[1]) / "e2e" / "new" / "auto_typer.py"
+          text = root.read_text(encoding="utf-8")
+          root.write_text(re.sub(r'APP_VERSION = "[^"]+"', 'APP_VERSION = "9.9.9"', text, count=1),
+                          encoding="utf-8")
+          PY
+          pyinstaller --onefile --console --noconfirm --name OldBuild --distpath e2e/dist \
+            --workpath e2e/work-old --specpath e2e/spec --paths e2e/old \
+            e2e/old/tools/update_restart_probe.py
+          pyinstaller --onefile --console --noconfirm --name NewBuild --distpath e2e/dist \
+            --workpath e2e/work-new --specpath e2e/spec --paths e2e/new \
+            e2e/new/tools/update_restart_probe.py
+          pyinstaller --onefile --console --noconfirm --name BrokenBuild --distpath e2e/dist \
+            --workpath e2e/work-broken --specpath e2e/spec \
+            tools/update_restart_probe_broken.py
+          ls -l e2e/dist
+
+      - name: A real update replaces the build, and the new build comes up
+        shell: pwsh
+        run: |
+          $app = Join-Path $PWD "e2e/app/AutoTyper.exe"
+          New-Item -ItemType Directory -Force -Path (Split-Path $app) | Out-Null
+          Copy-Item "e2e/dist/OldBuild.exe" $app
+          $new = (Resolve-Path "e2e/dist/NewBuild.exe").Path
+          $report = Join-Path $env:LOCALAPPDATA "AutoTyper/probe-report.txt"
+          Remove-Item $report -ErrorAction SilentlyContinue
+
+          & $app --self-update $app $new 9.9.9
+          if ($LASTEXITCODE -ne 0) { throw "the probe could not stage the update ($LASTEXITCODE)" }
+
+          $deadline = (Get-Date).AddSeconds(120)
+          while ((Get-Date) -lt $deadline -and (Get-FileHash $app).Hash -ne (Get-FileHash $new).Hash) {
+            Start-Sleep -Seconds 1
+          }
+          if ((Get-FileHash $app).Hash -ne (Get-FileHash $new).Hash) {
+            throw "the installed build was never replaced by the new one"
+          }
+          $verdict = Get-Content (Join-Path $env:LOCALAPPDATA "AutoTyper/update-result.txt") -Raw
+          Write-Host "swap script said: $verdict"
+          if ($verdict -notmatch "ok v9.9.9") { throw "the swap script did not report a started build: $verdict" }
+          if (-not (Test-Path $report)) { throw "the new build never reported its start-up" }
+          $said = Get-Content $report -Raw
+          Write-Host $said
+          if ($said -notmatch "v9\.9\.9 started from") { throw "the wrong build answered: $said" }
+          if ($said -notmatch "onefile-env=clean") { throw "the new build inherited onefile state: $said" }
+
+      - name: A new build that never starts is rolled back and the app comes back
+        shell: pwsh
+        run: |
+          $app = Join-Path $PWD "e2e/app/AutoTyper.exe"
+          $good = (Resolve-Path "e2e/dist/NewBuild.exe").Path
+          $broken = (Resolve-Path "e2e/dist/BrokenBuild.exe").Path
+          $report = Join-Path $env:LOCALAPPDATA "AutoTyper/probe-report.txt"
+          $result = Join-Path $env:LOCALAPPDATA "AutoTyper/update-result.txt"
+          Remove-Item $result -ErrorAction SilentlyContinue
+          $goodHash = (Get-FileHash $good).Hash
+          $before = (Get-Content $report -Raw).Split("`n").Count
+
+          # A short watch window: CI should not have to wait a minute for it.
+          & $app --self-update $app $broken 0.0.0 --watch 15
+          if ($LASTEXITCODE -ne 0) { throw "the probe could not stage the rollback case ($LASTEXITCODE)" }
+
+          $deadline = (Get-Date).AddSeconds(120)
+          while ((Get-Date) -lt $deadline -and -not (Test-Path $result)) { Start-Sleep -Seconds 1 }
+          if (-not (Test-Path $result)) { throw "the broken update left no verdict behind" }
+          $verdict = Get-Content $result -Raw
+          Write-Host "swap script said: $verdict"
+          if ($verdict -notmatch "rolled-back v0\.0\.0") { throw "expected a rollback, got: $verdict" }
+          if ((Get-FileHash $app).Hash -ne $goodHash) { throw "the working build was not restored" }
+
+          # ...and the restored build has to be started again, not just put back.
+          $deadline = (Get-Date).AddSeconds(60)
+          while ((Get-Date) -lt $deadline) {
+            $lines = (Get-Content $report -Raw).Split("`n")
+            if ($lines.Count -gt $before -and ($lines -join "`n") -match "v9\.9\.9 started from") { break }
+            Start-Sleep -Seconds 1
+          }
+          Write-Host (Get-Content $report -Raw)
+          $lines = (Get-Content $report -Raw).Split("`n")
+          if ($lines.Count -le $before) { throw "the restored build was never started" }
 
       - name: Check a onefile build starts with a stale PyInstaller environment
         shell: pwsh
