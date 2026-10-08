@@ -41,10 +41,22 @@ def report(line: str) -> None:
 
 
 def describe_environment() -> str:
-    inherited = sorted(name for name in at.os.environ
-                       if name.upper() in at._PYINSTALLER_RUNTIME_ENV_VARS_UPPER)
+    """What this build is, and whether it is using its *own* extraction folder.
+
+    A onefile child always inherits `_PYI_*` variables — they are how the
+    bootloader tells it where its files are — so "no variables at all" is not
+    the health check. The check is that
+    `_PYI_APPLICATION_HOME_DIR` names *this* build's extraction directory:
+    anything else means it is looking at another process's folder, which is the
+    state that dies with "Error loading Python DLL".
+    """
+    home = at.os.environ.get("_PYI_APPLICATION_HOME_DIR") or ""
+    meipass = getattr(at.sys, "_MEIPASS", "") or ""
+    own = bool(home) and bool(meipass) and (at.os.path.normcase(home)
+                                            == at.os.path.normcase(meipass))
     return (f"v{at.APP_VERSION} started from {at.sys.executable} "
-            f"(frozen={at.is_frozen()}, onefile-env={inherited if inherited else 'clean'})")
+            f"(frozen={at.is_frozen()}, onefile-home={home or 'unset'} "
+            f"({'own' if own else 'NOT own'}), meipass={meipass or 'unset'})")
 
 
 def main(argv):

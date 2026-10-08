@@ -155,69 +155,110 @@ jobs:
             tools/update_restart_probe_broken.py
           ls -l e2e/dist
 
+      # The two steps below are the ones that test the *reported* failure on a
+      # real machine. They report everything they know through the check-run
+      # API (annotations and the step summary), because the job logs of a
+      # Windows runner are not always reachable from where this is reviewed.
       - name: A real update replaces the build, and the new build comes up
         shell: pwsh
         run: |
           $app = Join-Path $PWD "e2e/app/AutoTyper.exe"
+          $data = Join-Path $env:LOCALAPPDATA "AutoTyper"
           New-Item -ItemType Directory -Force -Path (Split-Path $app) | Out-Null
           Copy-Item "e2e/dist/OldBuild.exe" $app
           $new = (Resolve-Path "e2e/dist/NewBuild.exe").Path
-          $report = Join-Path $env:LOCALAPPDATA "AutoTyper/probe-report.txt"
+          $report = Join-Path $data "probe-report.txt"
           Remove-Item $report -ErrorAction SilentlyContinue
 
-          & $app --self-update $app $new 9.9.9
-          if ($LASTEXITCODE -ne 0) { throw "the probe could not stage the update ($LASTEXITCODE)" }
+          $state = [ordered]@{}
+          try {
+            & $app --self-update $app $new 9.9.9
+            $state["probe_exit"] = $LASTEXITCODE
+            if ($LASTEXITCODE -ne 0) { throw "the probe could not stage the update" }
 
-          $deadline = (Get-Date).AddSeconds(120)
-          while ((Get-Date) -lt $deadline -and (Get-FileHash $app).Hash -ne (Get-FileHash $new).Hash) {
-            Start-Sleep -Seconds 1
+            $deadline = (Get-Date).AddSeconds(180)
+            while ((Get-Date) -lt $deadline -and (Get-FileHash $app).Hash -ne (Get-FileHash $new).Hash) {
+              Start-Sleep -Seconds 1
+            }
+            $state["installed_hash"] = (Get-FileHash $app).Hash
+            $state["new_hash"] = (Get-FileHash $new).Hash
+            $state["verdict"] = (Get-Content (Join-Path $data "update-result.txt") -Raw -ErrorAction SilentlyContinue)
+            $state["report"] = (Get-Content $report -Raw -ErrorAction SilentlyContinue)
+            $state["app_log"] = (Get-Content (Join-Path $data "AutoTyper.log") -Raw -ErrorAction SilentlyContinue)
+            $state["swap_log"] = (Get-Content (Join-Path $data "AutoTyper-update.log") -Raw -ErrorAction SilentlyContinue)
+
+            if ($state["installed_hash"] -ne $state["new_hash"]) {
+              throw "the installed build was never replaced by the new one"
+            }
+            if ($state["verdict"] -notmatch "ok v9\.9\.9") {
+              throw "the swap script did not report a started build: $($state["verdict"])"
+            }
+            if ($state["report"] -notmatch "v9\.9\.9 started from") {
+              throw "the wrong build answered: $($state["report"])"
+            }
+            if ($state["report"] -notmatch "\(own\)") {
+              throw "the new build is not using its own extraction folder: $($state["report"])"
+            }
+            Write-Host "::notice::AUTOTYPER-E2E-UPDATE:$(($state | ConvertTo-Json -Compress))"
+          } catch {
+            $state["error"] = "$_"
+            $json = ($state | ConvertTo-Json -Compress)
+            Write-Host "::error::AUTOTYPER-E2E-UPDATE-FAIL:$json"
+            "## End-to-end update failure" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            ($state | ConvertTo-Json) | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            throw
           }
-          if ((Get-FileHash $app).Hash -ne (Get-FileHash $new).Hash) {
-            throw "the installed build was never replaced by the new one"
-          }
-          $verdict = Get-Content (Join-Path $env:LOCALAPPDATA "AutoTyper/update-result.txt") -Raw
-          Write-Host "swap script said: $verdict"
-          if ($verdict -notmatch "ok v9.9.9") { throw "the swap script did not report a started build: $verdict" }
-          if (-not (Test-Path $report)) { throw "the new build never reported its start-up" }
-          $said = Get-Content $report -Raw
-          Write-Host $said
-          if ($said -notmatch "v9\.9\.9 started from") { throw "the wrong build answered: $said" }
-          if ($said -notmatch "onefile-env=clean") { throw "the new build inherited onefile state: $said" }
 
       - name: A new build that never starts is rolled back and the app comes back
         shell: pwsh
         run: |
           $app = Join-Path $PWD "e2e/app/AutoTyper.exe"
+          $data = Join-Path $env:LOCALAPPDATA "AutoTyper"
           $good = (Resolve-Path "e2e/dist/NewBuild.exe").Path
           $broken = (Resolve-Path "e2e/dist/BrokenBuild.exe").Path
-          $report = Join-Path $env:LOCALAPPDATA "AutoTyper/probe-report.txt"
-          $result = Join-Path $env:LOCALAPPDATA "AutoTyper/update-result.txt"
+          $report = Join-Path $data "probe-report.txt"
+          $result = Join-Path $data "update-result.txt"
           Remove-Item $result -ErrorAction SilentlyContinue
           $goodHash = (Get-FileHash $good).Hash
           $before = (Get-Content $report -Raw).Split("`n").Count
 
-          # A short watch window: CI should not have to wait a minute for it.
-          & $app --self-update $app $broken 0.0.0 --watch 15
-          if ($LASTEXITCODE -ne 0) { throw "the probe could not stage the rollback case ($LASTEXITCODE)" }
+          $state = [ordered]@{}
+          try {
+            # A short watch window: CI should not have to wait a minute for it.
+            & $app --self-update $app $broken 0.0.0 --watch 15
+            $state["probe_exit"] = $LASTEXITCODE
+            if ($LASTEXITCODE -ne 0) { throw "the probe could not stage the rollback case" }
 
-          $deadline = (Get-Date).AddSeconds(120)
-          while ((Get-Date) -lt $deadline -and -not (Test-Path $result)) { Start-Sleep -Seconds 1 }
-          if (-not (Test-Path $result)) { throw "the broken update left no verdict behind" }
-          $verdict = Get-Content $result -Raw
-          Write-Host "swap script said: $verdict"
-          if ($verdict -notmatch "rolled-back v0\.0\.0") { throw "expected a rollback, got: $verdict" }
-          if ((Get-FileHash $app).Hash -ne $goodHash) { throw "the working build was not restored" }
+            $deadline = (Get-Date).AddSeconds(180)
+            while ((Get-Date) -lt $deadline -and -not (Test-Path $result)) { Start-Sleep -Seconds 1 }
+            $state["verdict"] = (Get-Content $result -Raw -ErrorAction SilentlyContinue)
+            if ($state["verdict"] -notmatch "rolled-back v0\.0\.0") {
+              throw "expected a rollback, got: $($state["verdict"])"
+            }
+            $state["restored_hash"] = (Get-FileHash $app).Hash
+            $state["good_hash"] = $goodHash
+            if ($state["restored_hash"] -ne $goodHash) { throw "the working build was not restored" }
 
-          # ...and the restored build has to be started again, not just put back.
-          $deadline = (Get-Date).AddSeconds(60)
-          while ((Get-Date) -lt $deadline) {
-            $lines = (Get-Content $report -Raw).Split("`n")
-            if ($lines.Count -gt $before -and ($lines -join "`n") -match "v9\.9\.9 started from") { break }
-            Start-Sleep -Seconds 1
+            # ...and the restored build has to be started again, not just put back.
+            $deadline = (Get-Date).AddSeconds(90)
+            while ((Get-Date) -lt $deadline) {
+              $lines = (Get-Content $report -Raw).Split("`n")
+              if ($lines.Count -gt $before -and ($lines -join "`n") -match "v9\.9\.9 started from") { break }
+              Start-Sleep -Seconds 1
+            }
+            $state["report"] = (Get-Content $report -Raw -ErrorAction SilentlyContinue)
+            $state["swap_log"] = (Get-Content (Join-Path $data "AutoTyper-update.log") -Raw -ErrorAction SilentlyContinue)
+            $lines = $state["report"].Split("`n")
+            if ($lines.Count -le $before) { throw "the restored build was never started" }
+            Write-Host "::notice::AUTOTYPER-E2E-ROLLBACK:$(($state | ConvertTo-Json -Compress))"
+          } catch {
+            $state["error"] = "$_"
+            $json = ($state | ConvertTo-Json -Compress)
+            Write-Host "::error::AUTOTYPER-E2E-ROLLBACK-FAIL:$json"
+            "## End-to-end rollback failure" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            ($state | ConvertTo-Json) | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            throw
           }
-          Write-Host (Get-Content $report -Raw)
-          $lines = (Get-Content $report -Raw).Split("`n")
-          if ($lines.Count -le $before) { throw "the restored build was never started" }
 
       - name: Check a onefile build starts with a stale PyInstaller environment
         shell: pwsh

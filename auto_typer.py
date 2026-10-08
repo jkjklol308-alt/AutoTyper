@@ -1998,17 +1998,25 @@ def log_event(message: str, *, path: Optional[Path] = None) -> None:
 def log_startup_environment() -> None:
     """Record what this build is and what it inherited.
 
-    The onefile environment is the part that matters: a build that starts with
-    `_PYI_APPLICATION_HOME_DIR` still set is a build that is about to look for
-    the previous process's temporary folder.
+    In a onefile build the variable that matters is
+    `_PYI_APPLICATION_HOME_DIR`: a healthy start sees its *own* extraction
+    folder there (the bootloader sets it for the process it launches), while a
+    build that inherited the previous process's value is the "Error loading
+    Python DLL" case — it is looking for a folder that no longer exists.
     """
-    meipass = getattr(sys, "_MEIPASS", None)
+    meipass = getattr(sys, "_MEIPASS", None) or ""
     inherited = sorted(name for name in os.environ
                        if name.upper() in _PYINSTALLER_RUNTIME_ENV_VARS_UPPER)
+    if is_frozen():
+        home = os.environ.get("_PYI_APPLICATION_HOME_DIR") or ""
+        own = bool(home) and bool(meipass) and os.path.normcase(home) == os.path.normcase(meipass)
+        where = f"onefile-home={home or 'unset'} ({'own extraction dir' if own else 'NOT own'})"
+    else:
+        where = "onefile-home=n/a (source run)"
     log_event(
         "start: "
         f"frozen={is_frozen()} sys.executable={getattr(sys, 'executable', '')!r} "
-        f"_MEIPASS={meipass!r} onefile-env={inherited if inherited else 'clean'} "
+        f"_MEIPASS={meipass!r} {where} onefile-env={inherited if inherited else 'clean'} "
         f"python={sys.version.split()[0]} platform={sys.platform}"
     )
 
