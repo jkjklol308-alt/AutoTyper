@@ -165,17 +165,31 @@ jobs:
           # A batch file that dies half way through is silent when the app
           # starts it detached, so run it here in the foreground - with its
           # output captured - for both a build that signals its start-up and
-          # one that never does.
-          $json = python tools/swap_script_probe.py --work "$env:TEMP\swap-ci" `
-                    --good "e2e/dist/NewBuild.exe" --broken "e2e/dist/BrokenBuild.exe" `
-                    --version 9.9.9 --watch 20 2>&1 | Out-String
-          Write-Host $json
-          Write-Host "::notice::AUTOTYPER-SWAP-SCRIPT-RUN:$(($json -replace "`r?`n", " ").Substring(0, [Math]::Min(3500, $json.Length)))"
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "::error::AUTOTYPER-SWAP-SCRIPT-FAIL:$(($json -replace "`r?`n", " ").Substring(0, [Math]::Min(3500, $json.Length)))"
-            $json | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          # one that never does. Start-Process is used instead of a pipeline on
+          # purpose: `python ... 2>&1` throws under the runner's
+          # $ErrorActionPreference = "Stop" as soon as anything reaches stderr,
+          # which would lose the report this step exists to publish.
+          $out = Join-Path $env:TEMP "swap-script-probe.out"
+          $err = Join-Path $env:TEMP "swap-script-probe.err"
+          Remove-Item $out, $err -ErrorAction SilentlyContinue
+          $probe = Start-Process -FilePath "python" -PassThru -NoNewWindow -Wait `
+            -RedirectStandardOutput $out -RedirectStandardError $err `
+            -ArgumentList @("tools/swap_script_probe.py", "--work", "$env:TEMP\swap-ci",
+                            "--good", "e2e/dist/NewBuild.exe", "--broken", "e2e/dist/BrokenBuild.exe",
+                            "--version", "9.9.9", "--watch", "20")
+          $report = (Get-Content $out -Raw -ErrorAction SilentlyContinue)
+          $problems = (Get-Content $err -Raw -ErrorAction SilentlyContinue)
+          Write-Host $report
+          if ($problems) { Write-Host "stderr: $problems" }
+          $summary = (($report + "`nstderr: " + $problems) -replace "`r?`n", " ")
+          if ($summary.Length -gt 3200) { $summary = $summary.Substring(0, 3200) }
+          if ($probe.ExitCode -ne 0) {
+            Write-Host "::error::AUTOTYPER-SWAP-SCRIPT-FAIL:$summary"
+            $report | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            $problems | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             throw "the generated swap script did not behave"
           }
+          Write-Host "::notice::AUTOTYPER-SWAP-SCRIPT-OK:$summary"
 
       - name: A real update replaces the build, and the new build comes up
         shell: pwsh
