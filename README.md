@@ -24,14 +24,44 @@ AutoTyper checks the newest GitHub release once, silently, when the window opens
 
 When an update does exist, the status bar names the new version, AutoTyper asks once whether to download it, and the download button in ⚙ Settings is relabelled **⬇ Get vX .exe**. You always choose what happens:
 
+### If you see "Error loading Python DLL" right after an update
+
+That message means the new build was started with the path of the *previous*
+build's unpacked temporary folder — a folder that had already been deleted —
+so it could not find `python312.dll` inside it. Versions **v1.1.0 and v1.1.1**
+did exactly that, every time an update restarted the app.
+
+The fix (v1.1.2 and later) has to be *running* before it can help, and here it
+never gets that far: the build that performs an update is the one that decides
+how the next build is started. So do this once, by hand:
+
+1. Open the [latest release](https://github.com/jkjklol308-alt/AutoTyper/releases/latest).
+2. Download **`AutoTyper.exe`**.
+3. Replace your existing AutoTyper.exe with it — the one your shortcut opens, so
+   check the shortcut's *Target* if you have several copies lying around. (If a
+   failed update left an `AutoTyper.exe.old` next to it, you can delete that.)
+4. Start it, and check **⚙ Settings**: the hint under *Updates & downloads*
+   names the version you are running.
+
+From v1.1.2 on, updating restarts the app with the same clean environment a
+double-click gives it, and from **v1.1.3** the restart is verified as well:
+
 | How you are running | What updating does |
 | --- | --- |
-| The packaged **AutoTyper.exe** | Downloads the new build, then offers to install it. On install the app replaces itself, restarts automatically, and keeps your previous build as `AutoTyper.exe.old` in case you want to roll back. |
+| The packaged **AutoTyper.exe** | Downloads the new build, then offers to install it. On install the app replaces itself, restarts automatically, and keeps your previous build as `AutoTyper.exe.old` in case you want to roll back. The swap script waits for the new build to report that its window is up; if it never does, the previous build is put back and started again, and both logs explain what happened. |
 | From **source** (`python auto_typer.py`) | Downloads the new `AutoTyper.exe` into your Downloads folder and shows you where it went, so you can switch to the packaged build. |
 
-The automatic restart is deliberately set up like a manual double-click: it starts the new build with a **clean environment**. A onefile build keeps the path of its unpacked temporary folder in the environment, and a restart that inherited it would look for that (already deleted) folder instead of unpacking its own files — which made the app fail with *"Error loading Python DLL"* right after an update while the very same file started fine from a shortcut. If the swap cannot complete at all, the existing build is brought back up instead of leaving you without a program.
+Only files that begin with the Windows `MZ` executable header are ever accepted, and a download must match the size the release advertises for it, so a failed, truncated or HTML-error-page download can never overwrite a working build.
 
-Only files that begin with the Windows `MZ` executable header are ever accepted, so a failed, truncated or HTML-error-page download can never overwrite a working build. The CLI mirrors this:
+Updates leave a record. **⚙ Settings → Open update log** shows the log the app and the swap script write (`%LOCALAPPDATA%\AutoTyper`, or `~/.autotyper` outside Windows): the version and environment each build started with, every step of the download and the swap, and the verdict — `ok vX` or `rolled-back vX <why>`. If an update ever fails, that log is the whole story:
+
+```text
+[2026-10-08 13:18:18] v1.1.3 update: staging v1.1.4 over C:\Apps\AutoTyper.exe (new build: ..., 12100039 bytes)
+[2026-10-08 13:18:21] v1.1.4 start: frozen=True ... onefile-home=... (own extraction dir) ...
+[2026-10-08 13:18:22] v1.1.4 started and signalled that its window is up.
+```
+
+The CLI mirrors this:
 
 ```bash
 python auto_typer.py --check-update            # is there anything newer?
