@@ -2,6 +2,8 @@
 
 A high-fidelity keystroke trace simulator and auto-typer featuring motor kinematics (Fitts' Law ID, hand alternation), cognitive models (Ornstein-Uhlenbeck pace drift, fatigue, log-normal dwells, error episodes), editor auto-indent integration, and an intelligent **Coding Mode** with Pascal `begin`/`end` lookahead.
 
+**Current release: v1.2.2** — the window fits whatever monitor it opens on, the **Start AutoTyper** button is pinned above the bottom edge, and the main form scrolls. See [Window sizing and scrolling](#window-sizing-and-scrolling) and the [release notes](#release-notes).
+
 ## Download (no Python required)
 
 1. Open the [latest release](https://github.com/jkjklol308-alt/AutoTyper/releases/latest).
@@ -115,10 +117,10 @@ python auto_typer.py --benchmark --wpm 100 --seed 42 --csv trace.csv --coding-mo
 ## Running the Test Suite
 
 ```bash
-python -m unittest test_auto_typer.py test_custom_colours.py test_update_checker.py test_guide.py
+python -m unittest test_auto_typer.py test_custom_colours.py test_update_checker.py test_guide.py test_main_window_scrolling.py
 ```
 
-`test_auto_typer.py` replays planned traces through a virtual editor to prove the emitted keystrokes reproduce the source text exactly, `test_update_checker.py` covers the release lookup, the download/verification path and the self-update swap, `test_custom_colours.py` exercises the colour picker through a miniature `tkinter` stub so the suite runs with no display, and `test_guide.py` checks the built-in guide's wording and window the same way.
+`test_auto_typer.py` replays planned traces through a virtual editor to prove the emitted keystrokes reproduce the source text exactly, `test_update_checker.py` covers the release lookup, the download/verification path and the self-update swap, `test_custom_colours.py` exercises the colour picker through a miniature `tkinter` stub so the suite runs with no display, `test_guide.py` checks the built-in guide's wording and window the same way, and `test_main_window_scrolling.py` builds the whole main window against the same stub to prove the menu scrolls, the Start button stays pinned outside the scroll area, and the window never opens larger than the screen — including the 1366×768 laptop that first exposed the problem. `python -m unittest discover -p "test_*.py"` (what CI runs) picks up all of them.
 
 ## Custom UI Colours
 
@@ -134,13 +136,38 @@ The header keeps a single **⚙ Settings** button — palettes, window behaviour
 
 ## Window sizing and scrolling
 
-The main menu scrolls. On a monitor too short for the full layout — a 1366×768 laptop, a screen at 125% or 150% display scaling, or any window you have shrunk yourself — the menu gets a scrollbar on the right and the mouse wheel scrolls it, so every setting and the text box stay reachable instead of hanging off the bottom edge of the screen.
+**Since v1.2.2** the main menu scrolls. On a monitor too short for the full layout — a 1366×768 laptop, a screen at 125% or 150% display scaling, or any window you have shrunk yourself — the menu gets a scrollbar on the right and the mouse wheel scrolls it, so every setting and the text box stay reachable instead of hanging off the bottom edge of the screen.
 
 The status line, the progress bar and the **Start** / **Stop** buttons are pinned below the scrolling area, so the Start button is always on screen and always clickable. AutoTyper also opens no larger than the display allows (centred, and leaving room for the title bar and the taskbar) and its minimum size is small enough to fit a scaled-down laptop screen.
 
 ## Built-in guide
 
 **⚙ Settings → Guide → 📖 Open guide…** opens a separate window that lists every button and setting in plain language: what *Target speed*, *Base typo rate*, *Speed definition*, *Countdown*, *Editor indentation*, *Pascal coding mode*, *Verify and repair*, *Deterministic seed* and the text/benchmark/start/stop controls do, plus every control inside Settings itself. Nothing in it changes your settings, it follows the palette you have selected, and — because it is its own form rather than a panel — it stays open when you close Settings, so you can read it while you type.
+
+## Release notes
+
+### v1.2.2 — the window fits, and the main form scrolls
+
+The release that keeps **Start AutoTyper** reachable on every monitor:
+
+- The window opens at its design size when the screen is large enough and is
+  clamped to the display otherwise — centred, leaving room for the title bar
+  and the taskbar — so no part of it starts off-screen.
+- Its minimum size fits a scaled-down laptop screen, so the window can still
+  be shrunk until its footer fits.
+- The status line, the progress bar and the **Start AutoTyper** / **Stop**
+  buttons are packed *below* the scrolling area and stay on screen at any
+  window height; they can never be pushed off the bottom edge.
+- Everything above them — the header, **Typing settings**, the source box and
+  its tools — sits in a canvas with a vertical scrollbar, and the mouse wheel
+  scrolls it (`<MouseWheel>`, and buttons 4/5 on X11). The text box keeps
+  scrolling its own contents.
+- `.github/workflows/auto-tag.yml` creates the `v1.2.2` tag and starts the
+  `AutoTyper.exe` build when the version is merged, so the published release
+  can no longer be missed.
+
+The behaviours are covered by `test_main_window_scrolling.py`. Older releases
+are listed on the [releases page](https://github.com/jkjklol308-alt/AutoTyper/releases).
 
 ## Version numbering
 
