@@ -277,6 +277,9 @@ class _StubInterp:
 
 class _StubWidget:
     tk = _StubInterp()
+    is_toplevel = False
+    screen_size = (1920, 1080)   # tests shrink this to model a small monitor
+    width = height = reqwidth = reqheight = 1
 
     def __init__(self, master=None, **kwargs):
         self.master = master
@@ -332,9 +335,42 @@ class _StubWidget:
         pass
 
     def geometry(self, *args):
-        pass
+        if args:
+            self.geometry_requested = args[0]
+        return getattr(self, "geometry_requested", "")
 
-    minsize = resizable = deiconify = lift = transient = geometry
+    def minsize(self, *args):
+        if args:
+            self.minimum_size = tuple(args)
+        return getattr(self, "minimum_size", (1, 1))
+
+    resizable = deiconify = lift = transient = title
+
+    # geometry queries -----------------------------------------------------
+    def winfo_screenwidth(self):
+        return self.screen_size[0]
+
+    def winfo_screenheight(self):
+        return self.screen_size[1]
+
+    def winfo_width(self):
+        return self.width
+
+    def winfo_height(self):
+        return self.height
+
+    def winfo_reqwidth(self):
+        return self.reqwidth
+
+    def winfo_reqheight(self):
+        return self.reqheight
+
+    def winfo_toplevel(self):
+        """The nearest enclosing toplevel, as real Tk reports it."""
+        widget = self
+        while isinstance(widget.master, _StubWidget) and not widget.is_toplevel:
+            widget = widget.master
+        return widget
 
     def protocol(self, *args):
         pass
@@ -381,6 +417,12 @@ class _StubWidget:
 
     def state(self, *args):
         pass
+
+
+class _StubToplevel(_StubWidget):
+    """A separate window: `winfo_toplevel` on its children reports it."""
+
+    is_toplevel = True
 
 
 class _StubCanvas(_StubWidget):
@@ -439,7 +481,8 @@ class _StubCanvas(_StubWidget):
         pass
 
     def yview_scroll(self, *args):
-        pass
+        self.scrolled = getattr(self, "scrolled", [])
+        self.scrolled.append(args)
 
     def click(self, item):
         for callback in self.item_bindings.get((item, "<Button-1>"), []):
@@ -530,7 +573,7 @@ def _make_tk_stub():
     tk_module = types.ModuleType("tkinter")
     tk_module.TclError = _StubError
     tk_module.Tk = _StubWidget
-    tk_module.Toplevel = _StubWidget
+    tk_module.Toplevel = _StubToplevel
     tk_module.Frame = _StubWidget
     tk_module.LabelFrame = _StubWidget
     tk_module.Label = _StubWidget

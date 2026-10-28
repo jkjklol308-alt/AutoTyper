@@ -3195,6 +3195,12 @@ GUIDE_SECTIONS: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
          "finished — plus any update news."),
         ("Progress bar",
          "How much of the current run has been typed."),
+        ("Window scrolling",
+         "The scrollbar on the right scrolls the menu when the window is "
+         "shorter than the menu — on a small monitor, or after you shrink the "
+         "window yourself. The status line, the progress bar and the Start and "
+         "Stop buttons stay pinned to the bottom, so starting a run never "
+         "requires scrolling. The mouse wheel scrolls the menu too."),
         ("⚙ Settings",
          "Opens Appearance & Window Settings, where the palettes, the window "
          "behaviour, the update controls and this guide all live."),
@@ -3864,6 +3870,24 @@ class GuideWindow(_TkToplevel):
             pass
 
 
+# ---------------------------------------------------------------------------
+# Main window sizing
+# ---------------------------------------------------------------------------
+# The menu was laid out for a tall window, which does not fit on every
+# monitor: a 1366x768 laptop — or any screen with display scaling turned up —
+# has less usable height than 980 pixels once the title bar and the taskbar
+# are counted, and a window taller than the screen puts its bottom edge (and
+# with it the Start button) somewhere off-screen where it cannot be clicked.
+#
+# Two things prevent that now. The window never opens larger than the screen
+# allows (`AutoTyperApp._fit_window_to_screen`), and everything above the
+# footer scrolls, so even a short window reaches every control
+# (`AutoTyperApp._build_scrolling_body`).
+WINDOW_DEFAULT_SIZE: Tuple[int, int] = (780, 980)   # the size the layout likes
+WINDOW_MIN_SIZE: Tuple[int, int] = (620, 400)       # smallest usable window
+SCREEN_MARGIN: Tuple[int, int] = (24, 80)           # room for borders and taskbar
+
+
 class AutoTyperApp(_TkBase):
     """The V2 desktop interface.
 
@@ -3874,9 +3898,8 @@ class AutoTyperApp(_TkBase):
     def __init__(self):
         super().__init__()
         self.title("AutoTyper — Biomechanical Keystroke Simulator")
-        self.geometry("780x980")
-        self.minsize(680, 760)
         self.resizable(True, True)
+        self._fit_window_to_screen()
 
         self.is_running = False
         self.stop_event = threading.Event()
@@ -3891,6 +3914,7 @@ class AutoTyperApp(_TkBase):
         self.topmost_var = tk.BooleanVar(value=bool(saved_settings.get("topmost", True)))
         self.colors = _palette_colours(self.palette_name, self.available_palettes())
         self._settings_window = None
+        self._settings_scroller = None      # the settings body, for the wheel dispatcher
         self._settings_cards = []
         self._settings_theme_widgets = []
         self._settings_headings = []
@@ -3920,6 +3944,7 @@ class AutoTyperApp(_TkBase):
 
         self._configure_styles()
         self._build_ui()
+        self._install_wheel_dispatch()
         self._apply_palette(self.palette_name)
         self._apply_topmost()
 
@@ -4097,6 +4122,14 @@ class AutoTyperApp(_TkBase):
         self.configure(background=self.colors["background"])
         self._configure_styles()
 
+        scroller = getattr(self, "_body_scroller", None)
+        if scroller is not None:
+            # The scroll area is a plain tk.Canvas, so it does not follow the
+            # ttk styles and has to be repainted by hand.
+            try:
+                scroller.configure(background=self.colors["background"])
+            except tk.TclError:
+                pass
         if hasattr(self, "text_box"):
             self.text_box.configure(
                 background=self.colors["surface"],
@@ -4201,7 +4234,7 @@ class AutoTyperApp(_TkBase):
                    lambda event: scroller.configure(scrollregion=scroller.bbox("all")))
         scroller.bind("<Configure>",
                       lambda event: scroller.itemconfigure(body_id, width=event.width))
-        self._bind_settings_mousewheel(scroller)
+        self._settings_scroller = scroller
 
         self._settings_title = tk.Label(outer, text="Appearance & Window Settings", bg=c["background"],
                                         fg=c["primary"], font=("Segoe UI", 18, "bold"))
@@ -4317,20 +4350,6 @@ class AutoTyperApp(_TkBase):
         self._refresh_palette_cards()
         self._refresh_settings_window()
         self._refresh_update_controls()
-
-    def _bind_settings_mousewheel(self, scroller):
-        """Scroll the settings body with the wheel on Windows, macOS and X11."""
-        def on_wheel(event):
-            if event.num == 4:
-                delta = -1
-            elif event.num == 5:
-                delta = 1
-            else:
-                delta = -1 if event.delta > 0 else 1
-            scroller.yview_scroll(delta, "units")
-        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-            scroller.bind_all(sequence, on_wheel, add="+")
-        self._settings_wheel_bindings = ("<MouseWheel>", "<Button-4>", "<Button-5>")
 
     def _edit_selected_custom_palette(self):
         if not self.is_custom_palette(self.palette_name):
@@ -4532,12 +4551,7 @@ class AutoTyperApp(_TkBase):
             pass
 
     def _close_settings(self):
-        for sequence in getattr(self, "_settings_wheel_bindings", ()):  # stop scrolling the dead window
-            try:
-                self.unbind_all(sequence)
-            except tk.TclError:
-                pass
-        self._settings_wheel_bindings = ()
+        self._settings_scroller = None      # the app-wide wheel binding no longer routes here
         if self._settings_window is not None:
             try:
                 self._settings_window.destroy()
@@ -4560,9 +4574,48 @@ class AutoTyperApp(_TkBase):
     # ------------------------------------------------------------------
     # Main window
     # ------------------------------------------------------------------
+    def _fit_window_to_screen(self) -> Tuple[int, int]:
+        """Open at the design size, but never larger than the screen allows.
+
+        Returns the size the window was given. Keeping the window inside the
+        screen is what makes the Start button reachable on a monitor whose
+        usable height is smaller than the 980-pixel layout: the rest of the
+        menu scrolls (see `_build_scrolling_body`).
+        """
+        try:
+            screen_width = int(self.winfo_screenwidth())
+            screen_height = int(self.winfo_screenheight())
+        except (AttributeError, TypeError, ValueError, tk.TclError):
+            screen_width, screen_height = WINDOW_DEFAULT_SIZE
+        # Leave room for the window borders and the taskbar, which Tk reports
+        # as part of the screen.
+        available_width = max(320, screen_width - SCREEN_MARGIN[0])
+        available_height = max(240, screen_height - SCREEN_MARGIN[1])
+        width = min(WINDOW_DEFAULT_SIZE[0], available_width)
+        height = min(WINDOW_DEFAULT_SIZE[1], available_height)
+        # A minimum size larger than the screen would drag the window back
+        # over the edge, so the minimum follows the space that really exists.
+        self.minsize(min(WINDOW_MIN_SIZE[0], width), min(WINDOW_MIN_SIZE[1], height))
+        x = max(0, (screen_width - width) // 2)
+        y = max(0, (screen_height - SCREEN_MARGIN[1] - height) // 2)
+        self.geometry(f"{width}x{height}+{x}+{y}")
+        return width, height
+
+    # ------------------------------------------------------------------
+    # Main menu
+    # ------------------------------------------------------------------
     def _build_ui(self):
-        header = ttk.Frame(self, style="App.TFrame", padding=(24, 18, 24, 8))
-        header.pack(fill="x")
+        # Two things keep every control reachable on a short monitor. The
+        # footer — status, progress bar and, above all, the Start button — is
+        # packed first and lives *outside* the scrolling area, so it is on
+        # screen at any window height. Everything above it scrolls, so a
+        # window too short for the whole menu still reaches every control
+        # instead of hiding the bottom of it below the edge of the screen.
+        self._build_footer()
+        inner = self._build_scrolling_body()
+
+        header = ttk.Frame(inner, style="App.TFrame", padding=(24, 18, 24, 8))
+        header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(0, weight=1)
         ttk.Label(header, text="AutoTyper", style="Title.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(header, text="Biomechanical typing with Pascal-aware block navigation", style="Subtitle.TLabel").grid(
@@ -4573,8 +4626,8 @@ class AutoTyperApp(_TkBase):
         # .exe downloads all live in the Settings window ("Updates &
         # downloads"), so nothing redundant sits next to it out here.
 
-        body = ttk.Frame(self, style="App.TFrame", padding=(24, 8, 24, 8))
-        body.pack(fill="both", expand=True)
+        body = ttk.Frame(inner, style="App.TFrame", padding=(24, 8, 24, 8))
+        body.grid(row=1, column=0, sticky="nsew")
         body.columnconfigure(0, weight=1)
         body.rowconfigure(0, weight=0)
         body.rowconfigure(1, weight=1)
@@ -4675,8 +4728,18 @@ class AutoTyperApp(_TkBase):
         self.text_box.bind("<Control-a>", self._select_all_text)
         self.text_box.bind("<Control-A>", self._select_all_text)
 
+        self._normalise_entry(self.wpm_var, 20, 150, 0)
+        self._normalise_entry(self.typo_var, 0.01, 100.0, 2)
+
+    def _build_footer(self):
+        """Build the pinned footer, which is never part of the scroll area.
+
+        The Start button lives here: a window that is shorter than the menu
+        must never be able to push it off the bottom of the screen, which is
+        exactly what happened before the body scrolled.
+        """
         footer = ttk.Frame(self, style="App.TFrame", padding=(24, 4, 24, 18))
-        footer.pack(fill="x")
+        footer.pack(side="bottom", fill="x")
         footer.columnconfigure(0, weight=1)
         self.status_label = ttk.Label(footer, text="Status: Ready", style="App.TLabel", font=("Segoe UI", 10, "bold"))
         self.status_label.grid(row=0, column=0, sticky="w")
@@ -4691,8 +4754,119 @@ class AutoTyperApp(_TkBase):
         self.stop_btn = ttk.Button(buttons, text="Stop", style="Stop.TButton", command=self.stop_process, state="disabled")
         self.stop_btn.grid(row=0, column=1, sticky="ew", padx=(6, 0))
 
-        self._normalise_entry(self.wpm_var, 20, 150, 0)
-        self._normalise_entry(self.typo_var, 0.01, 100.0, 2)
+    def _build_scrolling_body(self):
+        """Create the scrollable area that holds the menu, and return it.
+
+        The area is a canvas with the header and the settings/text panels
+        inside one inner frame. A vertical scrollbar sits beside it, and the
+        wheel scrolls it wherever the pointer is over the main window.
+        """
+        c = self.colors
+        scroller = tk.Canvas(self, bg=c["background"], highlightthickness=0, bd=0)
+        scrollbar = ttk.Scrollbar(self, orient="vertical", command=scroller.yview,
+                                  style="App.Vertical.TScrollbar")
+        scroller.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        scroller.pack(side="left", fill="both", expand=True)
+
+        inner = ttk.Frame(scroller, style="App.TFrame")
+        window_id = scroller.create_window((0, 0), window=inner, anchor="nw")
+        inner.columnconfigure(0, weight=1)
+        inner.rowconfigure(1, weight=1)     # the text box grows with the window
+
+        self._body_scroller = scroller
+        self._body_scrollbar = scrollbar
+        self._body_inner = inner
+        self._body_window_id = window_id
+        self._body_size = None              # last width/height given to the item
+
+        inner.bind("<Configure>", self._sync_body_scroll)
+        scroller.bind("<Configure>", self._sync_body_scroll)
+        return inner
+
+    def _sync_body_scroll(self, event=None):
+        """Fit the scrolling body to the window, or let it scroll instead.
+
+        When the window is taller than the menu the body is stretched to the
+        full viewport, so the text box keeps filling the window exactly as it
+        did before the body scrolled. When the window is shorter, the body
+        keeps its natural height and the canvas scrolls to reveal the rest.
+        """
+        scroller = getattr(self, "_body_scroller", None)
+        inner = getattr(self, "_body_inner", None)
+        if scroller is None or inner is None:
+            return
+        try:
+            if not (scroller.winfo_exists() and inner.winfo_exists()):
+                return
+            viewport_width = scroller.winfo_width()
+            viewport_height = scroller.winfo_height()
+            previous = self._body_size
+            # Before the canvas is mapped both sizes read as 1, which would
+            # squash the menu; keep the previous width until it is real.
+            width = (viewport_width if viewport_width > 1
+                     else (previous[0] if previous else inner.winfo_reqwidth()))
+            height = max(inner.winfo_reqheight(), viewport_height)
+            if (width, height) != previous:
+                self._body_size = (width, height)
+                scroller.itemconfigure(self._body_window_id, width=width, height=height)
+            scroller.configure(scrollregion=scroller.bbox("all"))
+        except tk.TclError:
+            pass
+
+    def _install_wheel_dispatch(self):
+        """Route mouse-wheel events to the window the pointer is over.
+
+        One app-wide binding rather than one per window: ``bind_all`` is
+        global, so two windows binding it would both scroll, and unbinding it
+        when Settings closed would silently take the main menu's binding with
+        it. The widget that received the event tells us which form it is in.
+        """
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            try:
+                self.bind_all(sequence, self._on_mousewheel, add="+")
+            except tk.TclError:
+                pass
+
+    @staticmethod
+    def _wheel_steps(event) -> int:
+        """Translate a wheel event into whole scroll units (negative = up)."""
+        number = getattr(event, "num", 0)
+        if number == 4:
+            return -1
+        if number == 5:
+            return 1
+        return -1 if getattr(event, "delta", 0) > 0 else 1
+
+    def _on_mousewheel(self, event):
+        scroller = self._wheel_scroller(event)
+        if scroller is None:
+            return
+        try:
+            scroller.yview_scroll(self._wheel_steps(event), "units")
+        except tk.TclError:
+            pass
+
+    def _wheel_scroller(self, event):
+        """Pick the scrolling area that should react to ``event``."""
+        widget = getattr(event, "widget", None)
+        if widget is getattr(self, "text_box", None):
+            return None                     # the text box scrolls its own text
+        try:
+            window = widget.winfo_toplevel()
+        except (AttributeError, tk.TclError):
+            # No window information at all (an unusual platform, or the test
+            # stub): the main menu is where the wheel usually is.
+            return getattr(self, "_body_scroller", None)
+        if window is None:
+            return getattr(self, "_body_scroller", None)
+        if window is getattr(self, "_guide_window", None):
+            return None                     # the guide scrolls its own body
+        if window is getattr(self, "_settings_window", None):
+            return getattr(self, "_settings_scroller", None)
+        if window is self:
+            return getattr(self, "_body_scroller", None)
+        return None                         # some other dialog of ours
 
     @staticmethod
     def _normalise_entry(variable, minimum: float, maximum: float, decimals: int):
