@@ -132,6 +132,12 @@ The header keeps a single **⚙ Settings** button — palettes, window behaviour
 - Choose a **Primary**, **Accent** and **Background** colour (drag in the gradient or type `#RRGGBB`) — the colours are applied to the whole app as you pick them, so there is no separate preview to watch — then give the set a name and **Save colours**.
 - Saved palettes appear in the palette grid marked with a ★, are applied instantly, survive restarts (stored in `~/.autotyper_settings.json`; settings from earlier releases under the old file name are picked up automatically), and can be re-opened for editing by double-clicking a card or pressing **Edit selected**. **Delete selected** removes one; built-in palettes cannot be deleted. Up to 16 custom palettes are kept.
 
+## Window sizing and scrolling
+
+The main menu scrolls. On a monitor too short for the full layout — a 1366×768 laptop, a screen at 125% or 150% display scaling, or any window you have shrunk yourself — the menu gets a scrollbar on the right and the mouse wheel scrolls it, so every setting and the text box stay reachable instead of hanging off the bottom edge of the screen.
+
+The status line, the progress bar and the **Start** / **Stop** buttons are pinned below the scrolling area, so the Start button is always on screen and always clickable. AutoTyper also opens no larger than the display allows (centred, and leaving room for the title bar and the taskbar) and its minimum size is small enough to fit a scaled-down laptop screen.
+
 ## Built-in guide
 
 **⚙ Settings → Guide → 📖 Open guide…** opens a separate window that lists every button and setting in plain language: what *Target speed*, *Base typo rate*, *Speed definition*, *Countdown*, *Editor indentation*, *Pascal coding mode*, *Verify and repair*, *Deterministic seed* and the text/benchmark/start/stop controls do, plus every control inside Settings itself. Nothing in it changes your settings, it follows the palette you have selected, and — because it is its own form rather than a panel — it stays open when you close Settings, so you can read it while you type.
