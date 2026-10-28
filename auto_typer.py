@@ -52,6 +52,13 @@ A next-generation human typing simulator implementing:
      preview" panel that used to sit at the bottom of the settings window
      has been removed: a palette is applied to the whole app the moment you
      click it, so the preview only repeated what was already on screen.
+ 12. A Window That Fits Every Monitor (v1.2.2): the window opens no larger
+     than the screen allows (centred, leaving room for the title bar and the
+     taskbar), and its minimum size fits a scaled-down laptop screen. The
+     status line, progress bar and Start/Stop buttons are pinned below a
+     scrolling body, so "Start AutoTyper" can never be pushed off the bottom
+     edge, and the rest of the main form — every setting and the source box —
+     scrolls by scrollbar and by mouse wheel on any window height.
 
 Usage:
     python auto_typer.py --benchmark --wpm 110 --mode net --coding-mode --file code.pas
